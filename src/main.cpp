@@ -15,7 +15,7 @@ int main()
     tga::Shader vertexShader = tga::loadShader(vertexShaderRelPath, tga::ShaderType::vertex, tgai);
     tga::Shader fragShader = tga::loadShader(fragShaderRelPath, tga::ShaderType::fragment, tgai);
 
-    tga::Window window = tgai.createWindow({960, 540});
+    tga::Window window = tgai.createWindow({1920 / 2, 1080 / 2});
 
     tga::RenderPassInfo renderPassInfo(vertexShader, fragShader, window);
     tga::RenderPass renderPass = tgai.createRenderPass(renderPassInfo);
