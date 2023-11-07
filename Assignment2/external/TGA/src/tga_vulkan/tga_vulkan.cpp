@@ -1,3 +1,7 @@
+#ifdef __APPLE__
+#define VK_ENABLE_BETA_EXTENSIONS 1
+#endif
+
 #include "tga/tga_vulkan/tga_vulkan.hpp"
 
 #include "tga/tga_vulkan/tga_vulkan_debug.hpp"
@@ -155,15 +159,20 @@ namespace /*init vulkan objects*/
     static const std::array<const char *, 1> vulkanLayers = {"VK_LAYER_KHRONOS_validation"};
     vk::Instance createInstance(VulkanWSI const& wsi)
     {
+        vk::InstanceCreateFlags iFlags{};
+
         auto extensions = wsi.getRequiredExtensions();
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+#ifdef __APPLE__
+        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        iFlags = static_cast<vk::InstanceCreateFlagBits>(VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR);
+#endif
         vk::ApplicationInfo appInfo("TGA", 1, "TGA", 1, VK_API_VERSION_1_2);
         auto instance = vk::createInstance(vk::InstanceCreateInfo()
                                                .setPApplicationInfo(&appInfo)
                                                .setPEnabledLayerNames(vulkanLayers)
                                                .setPEnabledExtensionNames(extensions)
-
-        );
+                                               .setFlags(iFlags));
         loadVkInstanceExtensions(instance);
         return instance;
     }
@@ -230,6 +239,10 @@ namespace /*init vulkan objects*/
         }(rayQueryFeature.rayQuery);
         if (rayQueryFeature.rayQuery) std::cout << "Vulkan RayQuery extension enabled\n";
 
+#ifdef __APPLE_
+        extensions.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+#endif
+
         float queuePriority = 1.0f;
         std::array<vk::DeviceQueueCreateInfo, 1> queueInfos{
             vk::DeviceQueueCreateInfo({}, renderQueueFamily, 1, &queuePriority)};
@@ -272,11 +285,13 @@ namespace /*helper functions*/
 
         for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
             auto& memType = memProps.memoryTypes[i];
-            auto heapSize = memProps.memoryHeaps[memType.heapIndex].size;
             if ((memType.propertyFlags & propertyMask) != propertyMask) continue;
-            if (bestSize > heapSize) continue;
-            memoryIndex = i;
+
+            auto heapSize = memProps.memoryHeaps[memType.heapIndex].size;
+            if (bestSize >= heapSize) continue;
+
             bestSize = heapSize;
+            memoryIndex = i;
         }
         return memoryIndex;
     }
@@ -290,6 +305,7 @@ namespace /*helper functions*/
     T toRawHandle(size_t value)
     {
         T handle;
+        value++;
         static_assert(sizeof(handle) == sizeof(value));
         std::memcpy(&handle, &value, sizeof(handle));
         return handle;
@@ -368,16 +384,16 @@ Interface::~Interface()
     auto& cmdPool = state->cmdPool;
     auto& wsi = state->wsi;
 
-    for (size_t i = 0; i < state->shaders.size(); ++i) free(toRawHandle<TgaShader>(i + 1));
-    for (size_t i = 0; i < state->buffers.size(); ++i) free(toRawHandle<TgaBuffer>(i + 1));
-    for (size_t i = 0; i < state->stagingBuffers.size(); ++i) free(toRawHandle<TgaStagingBuffer>(i + 1));
-    for (size_t i = 0; i < state->textures.size(); ++i) free(toRawHandle<TgaTexture>(i + 1));
-    for (size_t i = 0; i < state->inputSets.size(); ++i) free(toRawHandle<TgaInputSet>(i + 1));
-    for (size_t i = 0; i < state->renderPasses.size(); ++i) free(toRawHandle<TgaRenderPass>(i + 1));
-    for (size_t i = 0; i < state->computePasses.size(); ++i) free(toRawHandle<TgaComputePass>(i + 1));
-    for (size_t i = 0; i < state->commandBuffers.size(); ++i) free(toRawHandle<TgaCommandBuffer>(i + 1));
+    for (size_t i = 0; i < state->shaders.size(); ++i) free(toRawHandle<TgaShader>(i));
+    for (size_t i = 0; i < state->buffers.size(); ++i) free(toRawHandle<TgaBuffer>(i));
+    for (size_t i = 0; i < state->stagingBuffers.size(); ++i) free(toRawHandle<TgaStagingBuffer>(i));
+    for (size_t i = 0; i < state->textures.size(); ++i) free(toRawHandle<TgaTexture>(i));
+    for (size_t i = 0; i < state->inputSets.size(); ++i) free(toRawHandle<TgaInputSet>(i));
+    for (size_t i = 0; i < state->renderPasses.size(); ++i) free(toRawHandle<TgaRenderPass>(i));
+    for (size_t i = 0; i < state->computePasses.size(); ++i) free(toRawHandle<TgaComputePass>(i));
+    for (size_t i = 0; i < state->commandBuffers.size(); ++i) free(toRawHandle<TgaCommandBuffer>(i));
     for (size_t i = 0; i < state->acclerationStructures.size(); ++i)
-        free(toRawHandle<TgaTopLevelAccelerationStructure>(i + 1));
+        free(toRawHandle<TgaTopLevelAccelerationStructure>(i));
 
     while (!wsi.windows.empty()) free(wsi.windows.begin()->first);
 
@@ -397,8 +413,7 @@ Shader Interface::createShader(ShaderInfo const& shaderInfo)
 
     vk::ShaderModule module =
         device.createShaderModule({{}, shaderInfo.srcSize, reinterpret_cast<const uint32_t *>(shaderInfo.src)});
-    shaders.push_back({module, shaderInfo.type});
-    return Shader{toRawHandle<TgaShader>(shaders.size())};
+    return Shader{toRawHandle<TgaShader>(shaders.push_back({module, shaderInfo.type}))};
 }
 
 StagingBuffer Interface::createStagingBuffer(StagingBufferInfo const& bufferInfo)
@@ -423,8 +438,7 @@ StagingBuffer Interface::createStagingBuffer(StagingBufferInfo const& bufferInfo
     auto mapping = device.mapMemory(memory, 0, bufferInfo.dataSize);
     if (bufferInfo.data) std::memcpy(mapping, bufferInfo.data, bufferInfo.dataSize);
 
-    stagingBuffers.push_back({buffer, mapping, memory});
-    return tga::StagingBuffer{toRawHandle<TgaStagingBuffer>(stagingBuffers.size())};
+    return tga::StagingBuffer{toRawHandle<TgaStagingBuffer>(stagingBuffers.push_back({buffer, mapping, memory}))};
 }
 
 Buffer Interface::createBuffer(BufferInfo const& bufferInfo)
@@ -444,8 +458,7 @@ Buffer Interface::createBuffer(BufferInfo const& bufferInfo)
     vk::DeviceMemory vkMemory = device.allocateMemory({mr.size, deviceMemoryIndex});
     device.bindBufferMemory(buffer, vkMemory, 0);
 
-    buffers.push_back({buffer, vkMemory, usage, bufferInfo.size});
-    tga::Buffer handle{toRawHandle<TgaBuffer>(buffers.size())};
+    tga::Buffer handle{toRawHandle<TgaBuffer>(buffers.push_back({buffer, vkMemory, usage, bufferInfo.size}))};
 
     if (bufferInfo.srcData) {
         auto& renderQueue = state->renderQueue;
@@ -560,8 +573,7 @@ Texture Interface::createTexture(TextureInfo const& textureInfo)
                                                    .setAddressModeV(addressMode)
                                                    .setAddressModeW(addressMode));
 
-    textures.push_back({image, view, memory, sampler, extent, format, {}});
-    Texture handle{toRawHandle<TgaTexture>(textures.size())};
+    Texture handle{toRawHandle<TgaTexture>(textures.push_back({image, view, memory, sampler, extent, format, {}}))};
 
     OneTimeCommand createTexture{device, cmdPool, renderQueue};
     if (textureInfo.srcData) {
@@ -713,8 +725,8 @@ InputSet Interface::createInputSet(InputSetInfo const& inputSetInfo)
     }
     device.updateDescriptorSets(writeSets, {});
 
-    inputSets.push_back({descriptorPool, descriptorSet, bindPoint, layoutData.pipelineLayout, inputSetInfo.index});
-    return tga::InputSet{toRawHandle<TgaInputSet>(inputSets.size())};
+    return tga::InputSet{toRawHandle<TgaInputSet>(inputSets.push_back(
+        {descriptorPool, descriptorSet, bindPoint, layoutData.pipelineLayout, inputSetInfo.index}))};
 }
 
 RenderPass Interface::createRenderPass(RenderPassInfo const& renderPassInfo)
@@ -746,8 +758,7 @@ RenderPass Interface::createRenderPass(RenderPassInfo const& renderPassInfo)
         OneTimeCommand{device, cmdPool, renderQueue}.cmd.pipelineBarrier(
             vk::PipelineStageFlagBits::eTopOfPipe,
             vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests, {}, {}, {},
-            layoutTransitionBarrier(image, vk::ImageLayout::eUndefined,
-                                    vk::ImageLayout::eDepthAttachmentStencilReadOnlyOptimal,
+            layoutTransitionBarrier(image, vk::ImageLayout::eUndefined, vk::ImageLayout::eDepthStencilAttachmentOptimal,
                                     vk::ImageAspectFlagBits::eDepth));
 
         return {image, view, memory};
@@ -956,10 +967,9 @@ RenderPass Interface::createRenderPass(RenderPassInfo const& renderPassInfo)
             .value;
     }();
 
-    renderPasses.push_back(
+    return tga::RenderPass{toRawHandle<TgaRenderPass>(renderPasses.push_back(
         {pipeline, renderPass, std::move(framebuffers), renderArea,
-         vkData::Layout{pipelineLayout, std::move(descriptorSetLayouts), std::move(setDescriptorTypes)}});
-    return tga::RenderPass{toRawHandle<TgaRenderPass>(renderPasses.size())};
+         vkData::Layout{pipelineLayout, std::move(descriptorSetLayouts), std::move(setDescriptorTypes)}}))};
 }
 
 ComputePass Interface::createComputePass(ComputePassInfo const& computePassInfo)
@@ -1003,9 +1013,9 @@ ComputePass Interface::createComputePass(ComputePassInfo const& computePassInfo)
                                         pipelineLayout})
             .value;
 
-    computePasses.push_back(
-        {pipeline, vkData::Layout{pipelineLayout, std::move(descriptorSetLayouts), std::move(setDescriptorTypes)}});
-    return tga::ComputePass{toRawHandle<TgaComputePass>(computePasses.size())};
+    ;
+    return tga::ComputePass{toRawHandle<TgaComputePass>(computePasses.push_back(
+        {pipeline, vkData::Layout{pipelineLayout, std::move(descriptorSetLayouts), std::move(setDescriptorTypes)}}))};
 }
 
 ext::TopLevelAccelerationStructure Interface::createTopLevelAccelerationStructure(
@@ -1036,7 +1046,7 @@ ext::TopLevelAccelerationStructure Interface::createTopLevelAccelerationStructur
     // TODO one expects many here
     auto instanceGeometry = vk::AccelerationStructureGeometryKHR{}.setGeometry(instanceData);
 
-    auto maxPrimitives = TLASInfo.instanceInfos.size();
+    auto maxPrimitives = static_cast<uint32_t>(TLASInfo.instanceInfos.size());
 
     vk::AccelerationStructureBuildGeometryInfoKHR buildInfo;
     buildInfo.setType(vk::AccelerationStructureTypeKHR::eTopLevel)
@@ -1072,7 +1082,7 @@ ext::TopLevelAccelerationStructure Interface::createTopLevelAccelerationStructur
                                                           .setSize(buildSizes.accelerationStructureSize)
                                                           .setType(vk::AccelerationStructureTypeKHR::eBottomLevel));
 
-    std::vector<vk::AccelerationStructureBuildRangeInfoKHR *> rangeInfos;
+    std::vector<vk::AccelerationStructureBuildRangeInfoKHR const *> rangeInfos;
     // auto rangeInfo = vk::AccelerationStructureBuildRangeInfoKHR{}
     // .setPrimitiveCount(1)
     //                      .setFirstVertex(BLASInfo.firstVertex)
@@ -1084,12 +1094,11 @@ ext::TopLevelAccelerationStructure Interface::createTopLevelAccelerationStructur
         ot.cmd.buildAccelerationStructuresKHR(buildInfo, rangeInfos);
     }
 
-    acclerationStructures.push_back({blas, acBuffer, acMem});
+    auto idx = acclerationStructures.push_back({blas, acBuffer, acMem});
 
     device.destroy(scratchBuffer);
     device.free(scratchBufferMem);
-    return tga::ext::TopLevelAccelerationStructure{
-        toRawHandle<TgaTopLevelAccelerationStructure>(acclerationStructures.size())};
+    return tga::ext::TopLevelAccelerationStructure{toRawHandle<TgaTopLevelAccelerationStructure>(idx)};
 }
 
 ext::BottomLevelAccelerationStructure Interface::createBottomLevelAccelerationStructure(
@@ -1164,12 +1173,11 @@ ext::BottomLevelAccelerationStructure Interface::createBottomLevelAccelerationSt
         ot.cmd.buildAccelerationStructuresKHR(buildInfo, &rangeInfo);
     }
 
-    acclerationStructures.push_back({blas, acBuffer, acMem});
+    auto idx = acclerationStructures.push_back({blas, acBuffer, acMem});
 
     device.destroy(scratchBuffer);
     device.free(scratchBufferMem);
-    return tga::ext::BottomLevelAccelerationStructure{
-        toRawHandle<TgaBottomLevelAccelerationStructure>(acclerationStructures.size())};
+    return tga::ext::BottomLevelAccelerationStructure{toRawHandle<TgaBottomLevelAccelerationStructure>(idx)};
 }
 
 CommandBuffer Interface::beginCommandBuffer(CommandBuffer cmdBuffer)
@@ -1178,9 +1186,9 @@ CommandBuffer Interface::beginCommandBuffer(CommandBuffer cmdBuffer)
     auto& commandBuffers = state->commandBuffers;
     auto& cmdPool = state->cmdPool;
     if (!cmdBuffer) {
-        commandBuffers.push_back({device.allocateCommandBuffers({cmdPool, vk::CommandBufferLevel::ePrimary, 1})[0],
-                                  device.createFence({vk::FenceCreateFlagBits::eSignaled})});
-        cmdBuffer = toRawHandle<TgaCommandBuffer>(commandBuffers.size());
+        cmdBuffer = toRawHandle<TgaCommandBuffer>(
+            commandBuffers.push_back({device.allocateCommandBuffers({cmdPool, vk::CommandBufferLevel::ePrimary, 1})[0],
+                                      device.createFence({vk::FenceCreateFlagBits::eSignaled})}));
     }
     auto& cmdData = state->getData(cmdBuffer);
 
@@ -1311,8 +1319,8 @@ void Interface::setRenderPass(CommandBuffer cmdBuffer, RenderPass renderPass, ui
 
     cmdData.cmdBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, renderPassData.pipeline);
     cmdData.cmdBuffer.setViewport(0, vk::Viewport()
-                                         .setWidth(renderPassData.area.width)
-                                         .setHeight(renderPassData.area.height)
+                                         .setWidth(static_cast<float>(renderPassData.area.width))
+                                         .setHeight(static_cast<float>(renderPassData.area.height))
                                          .setMinDepth(0)
                                          .setMaxDepth(1));
     cmdData.cmdBuffer.setScissor(0, {{{}, renderPassData.area}});
@@ -1345,6 +1353,7 @@ void Interface::waitForCompletion(CommandBuffer cmdBuffer)
     auto& cmdData = state->getData(cmdBuffer);
 
     std::ignore = device.waitForFences(cmdData.completionFence, true, std::numeric_limits<uint64_t>::max());
+    device.resetFences(cmdData.completionFence);
 }
 
 void *Interface::getMapping(StagingBuffer stagingBuffer) { return state->getData(stagingBuffer).mapping; }
@@ -1364,9 +1373,12 @@ uint32_t Interface::nextFrame(Window window)
     wsi.pollEvents(window);
 
     auto acquireSignal = windowData.nextAcquireSignal;
-    windowData.nextAcquireSignal = (windowData.nextAcquireSignal + 1) % windowData.imageAcquiredSignals.size();
-    auto nextFrameIndex =
-        device.acquireNextImageKHR(windowData.swapchain, 0, windowData.imageAcquiredSignals[acquireSignal]).value;
+    windowData.nextAcquireSignal =
+        (windowData.nextAcquireSignal + 1) % static_cast<uint32_t>(windowData.imageAcquiredSignals.size());
+    auto nextFrameIndex = device
+                              .acquireNextImageKHR(windowData.swapchain, std::numeric_limits<uint64_t>::max(),
+                                                   windowData.imageAcquiredSignals[acquireSignal])
+                              .value;
 
     vk::PipelineStageFlags waitStage{vk::PipelineStageFlagBits::eColorAttachmentOutput};
     renderQueue.submit(vk::SubmitInfo()
@@ -1385,7 +1397,8 @@ void Interface::present(Window window, uint32_t imageIndex)
     auto& renderQueue = state->renderQueue;
 
     auto renderSignal = windowData.nextRenderSignal;
-    windowData.nextRenderSignal = (windowData.nextRenderSignal + 1) % windowData.renderCompletedSignals.size();
+    windowData.nextRenderSignal =
+        (windowData.nextRenderSignal + 1) % static_cast<uint32_t>(windowData.renderCompletedSignals.size());
 
     renderQueue.submit(vk::SubmitInfo()
                            .setCommandBuffers(windowData.toPresentSrcTransitionCmds[imageIndex])
@@ -1412,17 +1425,19 @@ std::pair<uint32_t, uint32_t> Interface::screenResolution() { return state->wsi.
 
 void Interface::free(Shader shader)
 {
+    if (!shader) return;
     auto& device = state->device;
     auto& data = state->getData(shader);
     if (!data.module) return;
 
     device.waitIdle();
     device.destroy(data.module);
-    data = {};
+    state->shaders.free(dataIndexFromRawHandle(shader));
 }
 
 void Interface::free(StagingBuffer buffer)
 {
+    if (!buffer) return;
     auto& device = state->device;
     auto& data = state->getData(buffer);
     if (!data.buffer) return;
@@ -1431,11 +1446,12 @@ void Interface::free(StagingBuffer buffer)
     device.destroy(data.buffer);
     device.unmapMemory(data.memory);
     device.free(data.memory);
-    data = {};
+    state->stagingBuffers.free(dataIndexFromRawHandle(buffer));
 }
 
 void Interface::free(Buffer buffer)
 {
+    if (!buffer) return;
     auto& device = state->device;
     auto& data = state->getData(buffer);
     if (!data.buffer) return;
@@ -1443,10 +1459,11 @@ void Interface::free(Buffer buffer)
     device.waitIdle();
     device.destroy(data.buffer);
     device.free(data.memory);
-    data = {};
+    state->buffers.free(dataIndexFromRawHandle(buffer));
 }
 void Interface::free(Texture texture)
 {
+    if (!texture) return;
     auto& device = state->device;
     auto& data = state->getData(texture);
 
@@ -1464,10 +1481,11 @@ void Interface::free(Texture texture)
     device.destroy(data.imageView);
     device.destroy(data.image);
     device.free(data.memory);
-    data = {};
+    state->textures.free(dataIndexFromRawHandle(texture));
 }
 void Interface::free(Window window)
 {
+    if (!window) return;
     auto& instance = state->instance;
     auto& device = state->device;
     auto& cmdPool = state->cmdPool;
@@ -1489,16 +1507,18 @@ void Interface::free(Window window)
 }
 void Interface::free(InputSet inputSet)
 {
+    if (!inputSet) return;
     auto& device = state->device;
     auto& data = state->getData(inputSet);
     if (!data.descriptorPool) return;
 
     device.waitIdle();
     device.destroy(data.descriptorPool);
-    data = {};
+    state->inputSets.free(dataIndexFromRawHandle(inputSet));
 }
 void Interface::free(RenderPass renderPass)
 {
+    if (!renderPass) return;
     auto& device = state->device;
     auto& data = state->getData(renderPass);
     if (!data.pipeline) return;
@@ -1510,11 +1530,12 @@ void Interface::free(RenderPass renderPass)
     for (auto& sl : data.layout.setLayouts) device.destroy(sl);
     device.destroy(data.pipeline);
     device.destroy(data.layout.pipelineLayout);
-    data = {};
+    state->renderPasses.free(dataIndexFromRawHandle(renderPass));
 }
 
 void Interface::free(ComputePass computePass)
 {
+    if (!computePass) return;
     auto& device = state->device;
     auto& data = state->getData(computePass);
     if (!data.pipeline) return;
@@ -1523,11 +1544,12 @@ void Interface::free(ComputePass computePass)
     for (auto& sl : data.layout.setLayouts) device.destroy(sl);
     device.destroy(data.pipeline);
     device.destroy(data.layout.pipelineLayout);
-    data = {};
+    state->computePasses.free(dataIndexFromRawHandle(computePass));
 }
 
 void Interface::free(CommandBuffer commandBuffer)
 {
+    if (!commandBuffer) return;
     auto& device = state->device;
     auto& cmdPool = state->cmdPool;
     auto& data = state->getData(commandBuffer);
@@ -1535,11 +1557,12 @@ void Interface::free(CommandBuffer commandBuffer)
     device.waitIdle();
     device.freeCommandBuffers(cmdPool, {data.cmdBuffer});
     device.destroy(data.completionFence);
-    data = {};
+    state->commandBuffers.free(dataIndexFromRawHandle(commandBuffer));
 }
 
 void Interface::free(ext::TopLevelAccelerationStructure acStructure)
 {
+    if (!acStructure) return;
     auto& device = state->device;
     auto& data = state->getData(acStructure);
     if (!data.accelerationStructure) return;
@@ -1547,9 +1570,11 @@ void Interface::free(ext::TopLevelAccelerationStructure acStructure)
     device.destroyAccelerationStructureKHR(data.accelerationStructure);
     device.destroy(data.buffer);
     device.free(data.memory);
+    state->acclerationStructures.free(dataIndexFromRawHandle(acStructure));
 }
 void Interface::free(ext::BottomLevelAccelerationStructure acStructure)
 {
+    if (!acStructure) return;
     auto& device = state->device;
     auto& data = state->getData(acStructure);
     if (!data.accelerationStructure) return;
@@ -1557,6 +1582,7 @@ void Interface::free(ext::BottomLevelAccelerationStructure acStructure)
     device.destroyAccelerationStructureKHR(data.accelerationStructure);
     device.destroy(data.buffer);
     device.free(data.memory);
+    state->acclerationStructures.free(dataIndexFromRawHandle(acStructure));
 }
 
 }  // namespace tga
