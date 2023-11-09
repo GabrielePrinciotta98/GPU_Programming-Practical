@@ -38,22 +38,22 @@ int main()
     tga::Shader fragShader = tga::loadShader(fragShaderRelPath, tga::ShaderType::fragment, tgai);
 
     //load OBJ "man" that has inside vertex buffer and index buffer 
-    tga::Obj obj_man = tga::loadObj("../../Data/man/man.obj");
+    tga::Obj obj_man = tga::loadObj("../../../Data/man/man.obj");
     std::vector<tga::Vertex> vBuffer_man = obj_man.vertexBuffer;
     std::vector<uint32_t> iBuffer_man = obj_man.indexBuffer;
 
     // load OBJ "transporter" that has inside vertex buffer and index buffer
-    tga::Obj obj_transporter = tga::loadObj("../../Data/transporter/transporter.obj");
+    tga::Obj obj_transporter = tga::loadObj("../../../Data/transporter/transporter.obj");
     std::vector<tga::Vertex> vBuffer_transporter = obj_transporter.vertexBuffer;
     std::vector<uint32_t> iBuffer_transporter = obj_transporter.indexBuffer;
 
     //load "man" diffuse texture data 
-    const std::string diffuseTexRelPath_man = "../../Data/man/man_diffuse.png";
+    const std::string diffuseTexRelPath_man = "../../../Data/man/man_diffuse.png";
     tga::TextureBundle diffuseTex_man = tga::loadTexture(diffuseTexRelPath_man, 
                                         tga::Format::r8g8b8a8_srgb, tga::SamplerMode::nearest, tgai);
 
     // load "transporter" diffuse texture data
-    const std::string diffuseTexRelPath_transporter = "../../Data/transporter/transporter_diffuse.png";
+    const std::string diffuseTexRelPath_transporter = "../../../Data/transporter/transporter_diffuse.png";
     tga::TextureBundle diffuseTex_transporter =
         tga::loadTexture(diffuseTexRelPath_transporter, tga::Format::r8g8b8a8_srgb, tga::SamplerMode::nearest, tgai);
 
