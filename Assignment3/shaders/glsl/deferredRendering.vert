@@ -12,9 +12,12 @@ layout(set = 0, binding = 0) uniform CameraData{
     mat4 projection;
 }camera;
 
+
+#define NUM_MODELS 2
+
 // Model transform
-layout(set = 1, binding = 1) uniform ModelData{
-    mat4 transform;
+layout(set = 1, binding = 0) uniform ModelData{
+    mat4 transforms[NUM_MODELS];
 } model;
 
 layout(location = 0) out FragData{
@@ -27,12 +30,13 @@ layout(location = 0) out FragData{
 
 void main()
 {
+    mat4 currentTransform = model.transforms[gl_InstanceIndex];
     // Transform vertex position from object space to world space
-    vec4 worldPos = model.transform * vec4(position, 1);
+    vec4 worldPos = currentTransform * vec4(position, 1);
     
     // Transform normal and tangent vectors from object space to world space
-    fragData.normal = mat3(model.transform) * normal;
-    fragData.tangent = mat3(model.transform) * tangent;
+    fragData.normal = mat3(currentTransform) * normal;
+    fragData.tangent = mat3(currentTransform) * tangent;
     
     // Pass texture coordinates to the fragment shader
     fragData.uv = uv;
