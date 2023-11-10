@@ -13,7 +13,7 @@ layout(set = 0, binding = 0) uniform CameraData{
 }camera;
 
 
-#define NUM_MODELS 2
+#define NUM_MODELS 50
 
 // Model transform
 layout(set = 1, binding = 0) uniform ModelData{
