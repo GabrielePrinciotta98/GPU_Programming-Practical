@@ -13,7 +13,7 @@ layout(set = 0, binding = 0) uniform CameraData{
 }camera;
 
 
-#define NUM_MODELS 50
+#define NUM_MODELS 55
 
 // Model transform
 layout(set = 1, binding = 0) uniform ModelData{
@@ -47,5 +47,3 @@ void main()
     // Calculate final vertex position in clip space
     gl_Position = camera.projection * camera.view * worldPos;
 }
-
-
