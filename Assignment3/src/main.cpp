@@ -4,9 +4,6 @@
 #include "tga/tga_createInfo_structs.hpp"
 #include "tga/tga_utils.hpp"
 
-#define FORWARD_RENDERING 0
-#define DEFERRED_RENDERING 1
-
 struct Light {
     alignas(16) glm::vec3 lightPos = glm::vec3(0);
     alignas(16) glm::vec4 lightColor = glm::vec4(0);
@@ -58,21 +55,6 @@ int main()
     auto windowHeight = tgai.screenResolution().second / 6 * 5;
     tga::Window window = tgai.createWindow({windowWidth, windowHeight});
 
-
-    #if FORWARD_RENDERING
-    tga::Texture deferredTexture = tgai.createTexture({windowWidth, windowHeight, tga::Format::r32g32b32a32_sfloat});
-    //load the shaders
-    const std::string vertexShaderRelPath = "../shaders/forwardRenderingMultipleInstances_vert.spv";
-    const std::string fragShaderRelPath = "../shaders/forwardRenderingMultipleLights_frag.spv";
-    tga::Shader vertexShader = tga::loadShader(vertexShaderRelPath, tga::ShaderType::vertex, tgai);
-    tga::Shader fragShader = tga::loadShader(fragShaderRelPath, tga::ShaderType::fragment, tgai);
-    const std::string vertexShader_TexToScreen_Path = "../shaders/renderTextureToScreen_vert.spv";
-    const std::string fragShader_TexToScreen_Path = "../shaders/renderTextureToScreen_frag.spv";
-    tga::Shader vertexShaderTexToScreen = tga::loadShader(vertexShader_TexToScreen_Path, tga::ShaderType::vertex, tgai);
-    tga::Shader fragShaderTexToScreen = tga::loadShader(fragShader_TexToScreen_Path, tga::ShaderType::fragment, tgai);
-    #endif
-    
-    #if DEFERRED_RENDERING
     const std::string vertexShader_defRendering1_Path = "../shaders/deferredRenderingFirstPass_vert.spv";
     const std::string fragShader_defRendering1_Path = "../shaders/deferredRenderingFirstPass_frag.spv";
     const std::string vertexShader_defRendering2_Path = "../shaders/deferredRenderingSecondPass_vert.spv";
@@ -81,8 +63,12 @@ int main()
     tga::Shader fragShaderFirstPass = tga::loadShader(fragShader_defRendering1_Path, tga::ShaderType::fragment, tgai);   
     tga::Shader vertexShaderSecondPass = tga::loadShader(vertexShader_defRendering2_Path, tga::ShaderType::vertex, tgai);
     tga::Shader fragShaderSecondPass = tga::loadShader(fragShader_defRendering2_Path, tga::ShaderType::fragment, tgai);
-    #endif
 
+    const std::string vertexShader_TexToScreen_Path = "../shaders/renderTextureToScreen_vert.spv";
+    const std::string fragShader_PostProcessing_Path = "../shaders/postProcessing_frag.spv";
+    tga::Shader vertexShaderTexToScreen = tga::loadShader(vertexShader_TexToScreen_Path, tga::ShaderType::vertex, tgai);
+    tga::Shader fragShaderPostProc = tga::loadShader(fragShader_PostProcessing_Path, tga::ShaderType::fragment, tgai);
+    
 
     //load OBJ "man" that has inside vertex buffer and index buffer 
     tga::Obj obj_man = tga::loadObj("../../../Data/man/man.obj");
@@ -158,9 +144,6 @@ int main()
     // initialize many lights, assigning different positions and eventually colors
     std::vector<Light> lights;
     int nLigths = 144;
-    //lights.push_back({glm::vec3(2., 3., -1.), glm::vec4(glm::vec3(0, 1, 0), 1)});
-    //lights.push_back({glm::vec3(-2., 3., -1.), glm::vec4(glm::vec3(1, 0, 0), 1)});
-
     for (int i = 0; i < 12; ++i) {
         for (int j = 0; j < 12; ++j) {
             lights.push_back(
@@ -180,36 +163,15 @@ int main()
     std::vector<uint32_t> quadIndices = {0, 1, 2, 0, 3, 1};
     tga::Buffer indexBuffer_quad = makeBufferFromVector(tgai, tga::BufferUsage::index, quadIndices);
 
-
-    #if FORWARD_RENDERING
-    //create inputLayout for the renderPass
-    tga::InputLayout inputLayout({
-        // Set = 0: Camera data, Light data
-        {tga::BindingType::uniformBuffer, tga::BindingType::uniformBuffer}, 
-        // Set = 1: Transform data, Diffuse Tex
-        {tga::BindingType::uniformBuffer, tga::BindingType::sampler}
-        });
-    #endif
-    #if DEFERRED_RENDERING
-    // create inputLayout for the renderPass
+   
+    // create inputLayout for the first renderPass
     tga::InputLayout inputLayoutFirstPass({// Set = 0: Camera data
                                            {tga::BindingType::uniformBuffer},
                                            // Set = 1: Transform data, Diffuse Tex
                                            {tga::BindingType::uniformBuffer, tga::BindingType::sampler}
                                          });
-    #endif
 
-    // create renderPass
-    #if FORWARD_RENDERING
-    tga::RenderPassInfo renderPassInfo(vertexShader, fragShader, deferredTexture);
-    renderPassInfo.setClearOperations(tga::ClearOperation::all)
-        .setPerPixelOperations(tga::PerPixelOperations{}.setDepthCompareOp(tga::CompareOperation::lessEqual))
-        .setVertexLayout(tga::Vertex::layout())
-        .setInputLayout(inputLayout);
-    tga::RenderPass renderPass = tgai.createRenderPass(renderPassInfo);
-    #endif
-
-    #if DEFERRED_RENDERING
+    // create first renderPass : input loaded data -> output g-buffer (tex list)
     std::vector<tga::Texture> gBufferData;
     tga::Texture fragWorldPositions = tgai.createTexture({windowWidth, windowHeight, tga::Format::r32g32b32a32_sfloat});
     tga::Texture normals = tgai.createTexture({windowWidth, windowHeight, tga::Format::r32g32b32a32_sfloat});
@@ -225,25 +187,10 @@ int main()
         .setVertexLayout(tga::Vertex::layout())
         .setInputLayout(inputLayoutFirstPass);
     tga::RenderPass renderPassFirst = tgai.createRenderPass(renderPassInfoFirstPass);
-    #endif
 
+
+ 
     
-
-    #if FORWARD_RENDERING
-    tga::InputSet inputSetCameraLight =
-        tgai.createInputSet({renderPassFirst, {tga::Binding{cameraData, 0}, tga::Binding{lightsBuffer, 1}}, 0});
-
-    //create input set for specific mesh data (position and textures)
-    //"man"
-    tga::InputSet inputSet_man =
-        tgai.createInputSet({renderPassFirst, {tga::Binding{transformData_man, 0}, tga::Binding{diffuseTex_man, 1}}, 1});
-
-    //"transporter"
-    tga::InputSet inputSet_transporter = 
-        tgai.createInputSet({renderPassFirst, {tga::Binding{transformData_transporter, 0}, tga::Binding{diffuseTex_transporter, 1}}, 1});
-    #endif
-    
-    #if DEFERRED_RENDERING
     tga::InputSet inputSetCameraFirst =
         tgai.createInputSet({renderPassFirst, {tga::Binding{cameraData, 0}}, 0});
 
@@ -255,19 +202,8 @@ int main()
     //"transporter"
     tga::InputSet inputSet_transporter = tgai.createInputSet(
         {renderPassFirst, {tga::Binding{transformData_transporter, 0}, tga::Binding{diffuseTex_transporter, 1}}, 1});
-    #endif
 
-   
-    #if FORWARD_RENDERING
-    // create inputLayout for the second renderPass
-    tga::InputLayout inputLayoutSecond({{tga::BindingType::sampler}}); //Set = 0 : RenderedTex
-    tga::RenderPassInfo renderPassInfoSecond(vertexShaderTexToScreen, fragShaderTexToScreen, window);
-    renderPassInfoSecond.setInputLayout(inputLayoutSecond)
-        .setVertexLayout(tga::VertexLayout{/*stride =*/sizeof(glm::vec2), {{/*offset =*/0, tga::Format::r32g32_sfloat}}});
-    tga::RenderPass renderPassSecond = tgai.createRenderPass(renderPassInfoSecond);
-    tga::InputSet inputSetRenderedTexture = tgai.createInputSet({renderPassSecond, {tga::Binding{deferredTexture, 0}}, 0});
-    #endif
-    #if DEFERRED_RENDERING
+
     // create inputLayout for the second renderPass
     tga::InputLayout inputLayoutSecondPass({
             // Set = 0: Camera data, Light data
@@ -276,70 +212,41 @@ int main()
             {tga::BindingType::sampler, tga::BindingType::sampler, tga::BindingType::sampler}
         });
 
-    tga::RenderPassInfo renderPassInfoSecond(vertexShaderSecondPass, fragShaderSecondPass, window);
+     // create second renderPass : input g-buffer (tex list) -> output intermediateResult (tex)
+    tga::Texture intermediateResult = tgai.createTexture({windowWidth, windowHeight, tga::Format::r32g32b32a32_sfloat});
+    tga::RenderPassInfo renderPassInfoSecond(vertexShaderSecondPass, fragShaderSecondPass, intermediateResult);
     renderPassInfoSecond.setClearOperations(tga::ClearOperation::all)
         .setInputLayout(inputLayoutSecondPass)
         .setVertexLayout(tga::VertexLayout{sizeof(glm::vec2), {{0, tga::Format::r32g32_sfloat}}});
     tga::RenderPass renderPassSecond = tgai.createRenderPass(renderPassInfoSecond);
     
+    // create inputSets for the second renderPass
     tga::InputSet inputSetCameraLightSecond =
         tgai.createInputSet({renderPassSecond, {tga::Binding{cameraData, 0}, tga::Binding{lightsBuffer, 1}}, 0});
     tga::InputSet inputSetGBuffer = 
         tgai.createInputSet({renderPassSecond,
                              {tga::Binding{fragWorldPositions, 0}, tga::Binding{normals, 1}, tga::Binding{albedo, 2}},
                              1});
-    #endif
+
+    // create inputLayout for the third renderPass (post-proc)
+    tga::InputLayout inputLayoutPost({{tga::BindingType::sampler}});  // Set = 0 : RenderedTex
+    
+    // create third renderPass : input intermediateResult (tex) -> output window
+    tga::RenderPassInfo renderPassInfoPost(vertexShaderTexToScreen, fragShaderPostProc, window);
+    renderPassInfoPost.setInputLayout(inputLayoutPost)
+        .setVertexLayout(
+            tga::VertexLayout{sizeof(glm::vec2), {{0, tga::Format::r32g32_sfloat}}});
+    tga::RenderPass renderPassPost = tgai.createRenderPass(renderPassInfoPost);
+    
+     // create inputSets for the third renderPass
+    tga::InputSet inputSetIntermediateRes = tgai.createInputSet({renderPassPost, {tga::Binding{intermediateResult, 0}}, 0});
+
 
 
     //instantiate a commandBuffer
     std::vector<tga::CommandBuffer> cmdBuffers(tgai.backbufferCount(window));
     tga::CommandBuffer cmdBuffer{};
     
-    
-    #if FORWARD_RENDERING
-     //rendering loop
-    while (!tgai.windowShouldClose(window)) {
-        //handle to the frameBuffer of the window
-        uint32_t nextFrame = tgai.nextFrame(window);
-        tga::CommandBuffer& cmdBuffer = cmdBuffers[nextFrame];
-        if (!cmdBuffer) {
-            //initialize a commandRecorder to start recording commands
-            tga::CommandRecorder cmdRecorder = tga::CommandRecorder{tgai, cmdBuffer};
-            //setup the cmd recorder by passing it a render pass, the bindings and the draw calls
-            cmdRecorder.setRenderPass(renderPass, 0).bindInputSet(inputSetCameraLight);
-
-            cmdRecorder.bindVertexBuffer(vertexBuffer_man)
-                .bindIndexBuffer(indexBuffer_man)
-                .bindInputSet(inputSet_man)
-                .drawIndexed(iBuffer_man.size(), 0, 0, nInstances_man, 0)
-                .bindVertexBuffer(vertexBuffer_transporter)
-                .bindIndexBuffer(indexBuffer_transporter)
-                .bindInputSet(inputSet_transporter)
-                .drawIndexed(iBuffer_transporter.size(), 0, 0, nInstances_transporter, 0);
-            
-            cmdRecorder.setRenderPass(renderPassSecond, nextFrame, {0., 0., 0., 1})
-                .bindInputSet(inputSetRenderedTexture)
-                .bindVertexBuffer(vertexBuffer_quad)
-                .bindIndexBuffer(indexBuffer_quad)
-                .drawIndexed(6, 0, 0);
-
-            // the command recorder has done recording and can initialize a commandBuffer
-            cmdBuffer = cmdRecorder.endRecording();
-
-        } 
-        else {
-            // Need to reset the command buffer before re-using it
-            tgai.waitForCompletion(cmdBuffer);
-        }
-        
-        //execute the commands recorded in the commandBuffer
-        tgai.execute(cmdBuffer);
-        //present the current data in the frameBuffer "nextFrame" to the window
-        tgai.present(window, nextFrame);
-    }
-    #endif
-
-    #if DEFERRED_RENDERING
     // rendering loop
     while (!tgai.windowShouldClose(window)) {
         // handle to the frameBuffer of the window
@@ -360,9 +267,15 @@ int main()
                 .bindInputSet(inputSet_transporter)
                 .drawIndexed(iBuffer_transporter.size(), 0, 0, nInstances_transporter, 0);
 
-            cmdRecorder.setRenderPass(renderPassSecond, nextFrame)
+            cmdRecorder.setRenderPass(renderPassSecond, 0)
                 .bindInputSet(inputSetCameraLightSecond)
                 .bindInputSet(inputSetGBuffer)
+                .bindVertexBuffer(vertexBuffer_quad)
+                .bindIndexBuffer(indexBuffer_quad)
+                .drawIndexed(6, 0, 0);
+
+            cmdRecorder.setRenderPass(renderPassPost, nextFrame)
+                .bindInputSet(inputSetIntermediateRes)
                 .bindVertexBuffer(vertexBuffer_quad)
                 .bindIndexBuffer(indexBuffer_quad)
                 .drawIndexed(6, 0, 0);
@@ -380,7 +293,6 @@ int main()
         // present the current data in the frameBuffer "nextFrame" to the window
         tgai.present(window, nextFrame);
     }
-    #endif
 
     return 0;
 }
