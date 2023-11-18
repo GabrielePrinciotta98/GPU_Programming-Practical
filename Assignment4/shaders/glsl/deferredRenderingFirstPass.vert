@@ -16,7 +16,7 @@ layout(set = 0, binding = 0) uniform CameraData{
 #define NUM_MODELS 55
 
 // Model transform
-layout(set = 1, binding = 0) uniform ModelData{
+layout(set = 1, binding = 0) buffer ModelData{
     mat4 transforms[NUM_MODELS];
 } model;
 
