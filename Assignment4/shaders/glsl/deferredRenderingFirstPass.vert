@@ -7,7 +7,7 @@ layout(location = 2) in vec3 normal;
 layout(location = 3) in vec3 tangent;
 
 layout(set = 0, binding = 0) uniform CameraData{
-    mat4 toWorld;
+    vec3 cameraWorldPos;
     mat4 view;
     mat4 projection;
 }camera;

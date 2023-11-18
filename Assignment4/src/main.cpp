@@ -1,30 +1,50 @@
 #include <iostream>
+#include <filesystem>
 
 #include "tga/tga.hpp"
 #include "tga/tga_createInfo_structs.hpp"
 #include "tga/tga_utils.hpp"
+
+#include "CameraController.hpp"
+namespace fs = std::filesystem;
+
+std::vector<std::string> getSubfolderPaths(const std::string& folderPath)
+{
+    std::vector<std::string> subfolderPaths;
+
+    try {
+        for (const auto& entry : fs::directory_iterator(folderPath)) {
+            if (fs::is_directory(entry.path())) {
+                subfolderPaths.push_back(entry.path().string());
+            }
+        }
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "Error accessing folder: " << e.what() << std::endl;
+    }
+
+    return subfolderPaths;
+}
+
+std::string extractLastPathComponent(const std::string& path)
+{
+    fs::path filePath(path);
+    return filePath.filename().string();
+}
 
 struct Light {
     alignas(16) glm::vec3 lightPos = glm::vec3(0);
     alignas(16) glm::vec4 lightColor = glm::vec4(0);
 };
 
-struct Camera {
-    alignas(16) glm::mat4 toWorld = glm::mat4(1); // camera world pos (inverse of view matrix) -> needed for phong specular component
-    alignas(16) glm::mat4 view = glm::mat4(1);
-    alignas(16) glm::mat4 projection = glm::mat4(1);
-
-    Camera(const glm::vec3& position, const glm::vec3& target, const glm::vec3& up, float fov, float aspectRatio, float near,
-        float far)
-    {
-        projection = glm::perspective_vk(fov, aspectRatio, near, far);
-        view = glm::lookAt(position, target, up);
-        toWorld = glm::inverse(view);
-    }
-};
 
 struct Transform {
     alignas(16) glm::mat4 transform = glm::mat4(1); //model world pos (model matrix)
+};
+
+struct LoadedObjData {
+    
+    tga::TextureBundle diffuse_tex;
+    bool alreadyLoaded = false;
 };
 
 template <typename T>
@@ -36,7 +56,7 @@ tga::Buffer makeBufferFromStruct(tga::Interface& tgai, tga::BufferUsage usage, T
     return buffer;
 };
 
-auto makeBufferFromVector = [&](tga::Interface& tgai, tga::BufferUsage usage, auto& vec) {
+auto makeBufferFromVector = [](tga::Interface& tgai, tga::BufferUsage usage, auto& vec) {
     auto size = vec.size() * sizeof(vec[0]);
     auto staging = tgai.createStagingBuffer({size, tga::memoryAccess(vec)});
     auto buffer = tgai.createBuffer({usage, size, staging});
@@ -69,6 +89,17 @@ int main()
     tga::Shader vertexShaderTexToScreen = tga::loadShader(vertexShader_TexToScreen_Path, tga::ShaderType::vertex, tgai);
     tga::Shader fragShaderPostProc = tga::loadShader(fragShader_PostProcessing_Path, tga::ShaderType::fragment, tgai);
     
+    std::string folderPath = "../../../Data";
+    std::vector<std::string> subfolderPaths = getSubfolderPaths(folderPath);
+    
+    std::vector<LoadedObjData> loadedObjData;
+
+    for (const auto& subfolder : subfolderPaths) {
+        std::string subfolderName = extractLastPathComponent(subfolder);
+        tga::Obj obj = tga::loadObj(subfolder + "\\" + subfolderName + ".obj");
+        std::vector<tga::Vertex> vBuffer = obj.vertexBuffer;
+        std::vector<uint32_t> iBuffer = obj.indexBuffer;
+    }
 
     //load OBJ "man" that has inside vertex buffer and index buffer 
     tga::Obj obj_man = tga::loadObj("../../../Data/man/man.obj");
@@ -84,24 +115,20 @@ int main()
     const std::string diffuseTexRelPath_man = "../../../Data/man/man_diffuse.png";
     tga::TextureBundle diffuseTex_man = tga::loadTexture(diffuseTexRelPath_man, 
                                         tga::Format::r8g8b8a8_srgb, tga::SamplerMode::nearest, tgai);
-
+    
     // load "transporter" diffuse texture data
     const std::string diffuseTexRelPath_transporter = "../../../Data/transporter/transporter_diffuse.png";
     tga::TextureBundle diffuseTex_transporter = tga::loadTexture(diffuseTexRelPath_transporter, 
                                                 tga::Format::r8g8b8a8_srgb, tga::SamplerMode::nearest, tgai);    
-
-    //Define camera position and orientation such that meshes are in view, i.e. define view, proj matrices and inv of view to get camera pos
-    //const glm::vec3 position = glm::vec3(0.f, 5.f, 11.f);
-    const glm::vec3 position = glm::vec3(10.f, 2.f, 5.f);
     
-    const glm::vec3 up = glm::vec3(0.f, 1.f, 0.f);
-    const glm::vec3 cameraTarget = glm::vec3(0, 0, -7);
+    const glm::vec3 startPosition = glm::vec3(0.f, 2.f, -20.f);
     float aspectRatio = windowWidth / static_cast<float>(windowHeight);
-    auto fov = glm::radians(60.f);
-    Camera cam(position, cameraTarget, up, fov, aspectRatio, 0.1f, 1000.f);
-    // create buffer to send camera data(view + proj) to GPU
-    tga::Buffer cameraData = makeBufferFromStruct(tgai, tga::BufferUsage::uniform, cam);
+    std::unique_ptr<CameraController> camController = std::make_unique<CameraController>(tgai, window, 60, aspectRatio, 0.1f, 30000.f, startPosition,
+                                                       glm::vec3{0, 0, 1}, glm::vec3{0, 1, 0});
+    tga::Buffer cameraData =
+        tgai.createBuffer(tga::BufferInfo{tga::BufferUsage::uniform, sizeof(Camera), camController->Data()});
 
+      
 
     //"man" model 
     tga::Buffer vertexBuffer_man = makeBufferFromVector(tgai, tga::BufferUsage::vertex, vBuffer_man);
@@ -188,11 +215,8 @@ int main()
         .setInputLayout(inputLayoutFirstPass);
     tga::RenderPass renderPassFirst = tgai.createRenderPass(renderPassInfoFirstPass);
 
-
- 
-    
-    tga::InputSet inputSetCameraFirst =
-        tgai.createInputSet({renderPassFirst, {tga::Binding{cameraData, 0}}, 0});
+   
+    tga::InputSet inputSetCameraFirst = tgai.createInputSet({renderPassFirst, {tga::Binding{cameraData, 0}}, 0});
 
     // create input set for specific mesh data (position and textures)
     //"man"
@@ -221,8 +245,10 @@ int main()
     tga::RenderPass renderPassSecond = tgai.createRenderPass(renderPassInfoSecond);
     
     // create inputSets for the second renderPass
-    tga::InputSet inputSetCameraLightSecond =
-        tgai.createInputSet({renderPassSecond, {tga::Binding{cameraData, 0}, tga::Binding{lightsBuffer, 1}}, 0});
+    tga::InputSet inputSetCameraLightSecond = tgai.createInputSet(
+        {renderPassSecond, {tga::Binding{cameraData, 0}, tga::Binding{lightsBuffer, 1}}, 0});
+    
+
     tga::InputSet inputSetGBuffer = 
         tgai.createInputSet({renderPassSecond,
                              {tga::Binding{fragWorldPositions, 0}, tga::Binding{normals, 1}, tga::Binding{albedo, 2}},
@@ -256,7 +282,9 @@ int main()
             // initialize a commandRecorder to start recording commands
             tga::CommandRecorder cmdRecorder = tga::CommandRecorder{tgai, cmdBuffer};
             // setup the cmd recorder by passing it a render pass, the bindings and the draw calls
-            cmdRecorder.setRenderPass(renderPassFirst, 0).bindInputSet(inputSetCameraFirst);
+            cmdRecorder.bufferUpload(camController -> Data(), cameraData, sizeof(Camera))
+                .setRenderPass(renderPassFirst, 0)
+                .bindInputSet(inputSetCameraFirst);
 
             cmdRecorder.bindVertexBuffer(vertexBuffer_man)
                 .bindIndexBuffer(indexBuffer_man)
@@ -287,7 +315,8 @@ int main()
             // Need to reset the command buffer before re-using it
             tgai.waitForCompletion(cmdBuffer);
         }
-
+        //update camera data
+        camController->update(1./60.);  
         // execute the commands recorded in the commandBuffer
         tgai.execute(cmdBuffer);
         // present the current data in the frameBuffer "nextFrame" to the window

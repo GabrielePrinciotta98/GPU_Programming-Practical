@@ -8,7 +8,7 @@ layout(location = 0) in FragData{
 
 // Camera also bound here to get access to the inverseView / toWorld
 layout(set = 0, binding = 0) uniform CameraData{
-    mat4 toWorld;
+    vec3 cameraWorldPos;
     mat4 view;
     mat4 projection;
 }camera;
@@ -41,14 +41,14 @@ void main()
     vec3 normal = texture(normalsTex, fragData.uv).rgb;
     vec3 objectColor = texture(colorTex,fragData.uv).rgb;
 
-    vec3 cameraWorldPos = camera.toWorld[3].xyz;
+    //vec3 cameraWorldPos = camera.toWorld[3].xyz;
 
-    vec3 V = normalize(cameraWorldPos - positionWorld);
+    vec3 V = normalize(camera.cameraWorldPos - positionWorld);
     vec3 N = normalize(normal);
     
     vec3 color = vec3(0.0);
 
-    vec3 testColor = vec3(1, 0, 0);
+    vec3 testColor = camera.cameraWorldPos;
     for (int i=0; i<NUM_LIGHTS; ++i){
         vec3 L = normalize(lights[i].position);
         vec3 H = normalize(V+L);

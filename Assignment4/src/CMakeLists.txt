@@ -2,6 +2,7 @@ set(TARGET_NAME multiDraw)
 
 set(${TARGET_NAME}_SOURCES
     main.cpp
+    CameraController.cpp		
 )
 
 

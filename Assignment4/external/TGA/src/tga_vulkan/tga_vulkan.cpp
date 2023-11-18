@@ -216,9 +216,13 @@ namespace /*init vulkan objects*/
     vk::Device createDevice(vk::PhysicalDevice& gpu, uint32_t renderQueueFamily)
     {
         vk::PhysicalDeviceFeatures2 features;
+        vk::PhysicalDeviceVulkan11Features features_11;
+        vk::PhysicalDeviceVulkan12Features features_12;
         vk::PhysicalDeviceRayQueryFeaturesKHR rayQueryFeature;
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR asFeature;
-        features.pNext = &asFeature;
+        features.pNext = &features_11;
+        features_11.pNext = &features_12;
+        features_12.pNext = &asFeature;
         asFeature.pNext = &rayQueryFeature;
         gpu.getFeatures2(&features);
 
