@@ -32,6 +32,7 @@ struct ConfigData {
 //data for each model
 struct ModelData {
     ConfigData cfg;
+    tga::StagingBuffer staging_modelMatrices;
     tga::Buffer modelMatrices;
     tga::Buffer vertexBuffer, indexBuffer;
     uint32_t indexCount{0};
@@ -156,12 +157,13 @@ int main()
         std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.cfg.amount};
         for (size_t i = 0; i < matrixData.size(); ++i) {
             auto& matrix = matrixData[i];
-            glm::vec3 position = data.cfg.pos;
-            position += float(i) * data.cfg.offsets;
+            glm::vec3 position = data.cfg.pos; //initial position
+            position += float(i) * data.cfg.offsets; //spawn shifted by offset every loop
             matrix = glm::translate(glm::mat4(1), position) * glm::scale(glm::mat4(1), glm::vec3(data.cfg.scale));
         }
+        data.staging_modelMatrices = matrixStaging;
         data.modelMatrices = tgai.createBuffer({tga::BufferUsage::storage, matrixData.size_bytes(), matrixStaging});
-        tgai.free(matrixStaging);
+        //tgai.free(matrixStaging);
     }
     #pragma endregion
 
@@ -270,6 +272,8 @@ int main()
     // inputSets vertex buffer, index buffer, diffuse tex, # of indeces and # of instances for each model
     struct ModelRenderData {
         tga::Buffer vertexBuffer, indexBuffer;
+        tga::StagingBuffer staging_modelMatrices;
+        tga::Buffer modelMatrices;
         tga::InputSet gpuData;
         uint32_t indexCount;
         uint32_t numInstances;
@@ -280,7 +284,7 @@ int main()
     modelRenderData.reserve(modelData.size());
     for (auto& [modelName, data] : modelData) {
         modelRenderData.push_back(
-            {data.vertexBuffer, data.indexBuffer,
+            {data.vertexBuffer, data.indexBuffer, data.staging_modelMatrices, data.modelMatrices,
              tgai.createInputSet(
                  {geometryPass, {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.colorTex, 1}}, 1}),
              data.indexCount, data.cfg.amount});
@@ -334,7 +338,12 @@ int main()
             cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
                 .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
                 
-           
+            for (auto& data : modelRenderData) {
+                auto matrixStaging = data.staging_modelMatrices;
+                auto matrixBuffer = data.modelMatrices;
+                cmdRecorder.bufferUpload(matrixStaging, matrixBuffer, sizeof(glm::mat4) * data.numInstances);
+            }
+
             // 1. Geometry Pass
             cmdRecorder.setRenderPass(geometryPass, 0)
                 .bindInputSet(inputSetCamera_geometryPass);
@@ -370,7 +379,17 @@ int main()
         }
         //update camera data
         camController->update(dt);
-
+        //update model matrices
+        for (auto& data : modelRenderData) {
+            auto matrixStaging = data.staging_modelMatrices;
+            std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.numInstances};
+            for (size_t i = 0; i < matrixData.size(); ++i) {
+                auto& matrix = matrixData[i];
+                float angle = glm::radians(1.0f);           
+                matrix = matrix * glm::rotate(glm::mat4(1), angle, glm::vec3(0.,1.,0.));
+            }
+            data.staging_modelMatrices = matrixStaging;
+        }
         // execute the commands recorded in the commandBuffer
         tgai.execute(cmdBuffer);
         // present the current data in the frameBuffer "nextFrame" to the window
