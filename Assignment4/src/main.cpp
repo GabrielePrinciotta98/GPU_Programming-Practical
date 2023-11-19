@@ -307,10 +307,10 @@ int main()
     #pragma region 1st renderPass initialization 
     // create inputLayout for the first renderPass
     tga::InputLayout inputLayoutGeometryPass({// Set = 0: Camera data
-                                           {tga::BindingType::uniformBuffer},
+                                              {{tga::BindingType::uniformBuffer}},
                                            // Set = 1: Transform data, Diffuse Tex
-                                           {tga::BindingType::storageBuffer, tga::BindingType::sampler}
-                                         });
+                                           {{tga::BindingType::storageBuffer}, {tga::BindingType::sampler, 2}}
+                                            });
 
     // create first renderPass : input loaded data -> output g-buffer (tex list)
     std::vector<tga::Texture> gBufferData;
@@ -369,6 +369,16 @@ int main()
     // inputeSet camera for 1st pass
     tga::InputSet inputSetCamera_geometryPass = tgai.createInputSet({geometryPass, {tga::Binding{cameraData, 0}}, 0});
 
+    //tga::InputSet inputSetModels_geometryPass =
+    //    tgai.createInputSet({geometryPass, {tga::Binding{batch.modelMatricesBuffer_batch, 0}}, 1}); 
+
+    std::vector<tga::Binding> inputSetBindings{
+                                                {tga::Binding{batch.modelMatricesBuffer_batch, 0}},
+                                                {tga::Binding{batch.diffuseTex_batch[0], 1, 0}},
+                                               {tga::Binding{batch.diffuseTex_batch[1], 1, 1}}
+                                            };
+    tga::InputSet inputSetModelsTextures_geometryPass = tgai.createInputSet({geometryPass, inputSetBindings, 1});
+    
     // inputSets vertex buffer, index buffer, diffuse tex, # of indeces and # of instances for each model
     struct ModelRenderData {
         tga::Buffer vertexBuffer, indexBuffer;
@@ -389,6 +399,7 @@ int main()
                  {geometryPass, {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.colorTex, 1}}, 1}),
              data.indexCount, data.cfg.amount});
     }
+
     #pragma endregion
 
     #pragma region inputSets 2nd
@@ -448,12 +459,17 @@ int main()
             cmdRecorder.setRenderPass(geometryPass, 0)
                 .bindInputSet(inputSetCamera_geometryPass);
 
-            for (auto& data : modelRenderData) {
+
+            cmdRecorder.bindVertexBuffer(batch.vertexBuffer_batch)
+                .bindIndexBuffer(batch.indexBuffer_batch)
+                .bindInputSet(inputSetModelsTextures_geometryPass)
+                .drawIndexedIndirect(batch.indirectDrawBuffer, indirectCommands.size());
+            /*for (auto& data : modelRenderData) {
                 cmdRecorder.bindVertexBuffer(data.vertexBuffer)
                     .bindIndexBuffer(data.indexBuffer)
                     .bindInputSet(data.gpuData)
                     .drawIndexed(data.indexCount, 0, 0, data.numInstances);
-            }
+            }*/
 
             // 2. Lighting Pass
             cmdRecorder.setRenderPass(lightingPass, 0)

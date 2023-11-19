@@ -1,4 +1,4 @@
-#version 450
+#version 460
 
 // Position , uv, normal and tangent same as the tga::Vertex struct
 layout(location = 0) in vec3 position;
@@ -27,6 +27,9 @@ layout(location = 0) out FragData{
     vec2 uv;
 }fragData;
 
+layout(location = 5) out DrawIndex{
+    flat uint drawID;
+};
 
 void main()
 {
@@ -46,4 +49,6 @@ void main()
     
     // Calculate final vertex position in clip space
     gl_Position = camera.projection * camera.view * worldPos;
+
+    drawID = gl_DrawID;
 }
