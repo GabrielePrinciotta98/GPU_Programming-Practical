@@ -55,6 +55,7 @@ struct Batch {
     tga::Buffer modelMatricesBuffer_batch;
     std::vector<tga::Texture> diffuseTex_batch;
     tga::Buffer indirectDrawBuffer;
+    uint32_t totalInstances;
 };
 
 // A little helper function to create a staging buffer that acts like a specific type
@@ -258,13 +259,19 @@ int main()
     for (auto& [modelName, data] : loadedData) {
         batchModelMatricesData.insert(batchModelMatricesData.end(), data.modelMatricesData.begin(), data.modelMatricesData.end());
     }
-    batch.modelMatricesBuffer_batch = makeBufferFromVector(tgai, tga::BufferUsage::storage, batchModelMatricesData);
+    auto size = batchModelMatricesData.size() * sizeof(batchModelMatricesData[0]);
+    auto modelMatricesStaging = tgai.createStagingBuffer({size, tga::memoryAccess(batchModelMatricesData)});
+    batch.modelMatricesBuffer_batch = tgai.createBuffer({tga::BufferUsage::storage, size, modelMatricesStaging});
 
     for (auto& [modelName, data] : loadedData) {
         batch.diffuseTex_batch.push_back(data.diffuseTex);
     }
 
     batch.indirectDrawBuffer = indirectDrawBuffer;
+
+    for (auto& [modelName, data] : loadedData) {
+        batch.totalInstances += data.cfgData.amount;
+    }
     #pragma endregion
 
 
@@ -449,11 +456,13 @@ int main()
             cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
                 .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
                 
-            for (auto& data : modelRenderData) {
+            /*for (auto& data : modelRenderData) {
                 auto matrixStaging = data.staging_modelMatrices;
                 auto matrixBuffer = data.modelMatrices;
                 cmdRecorder.bufferUpload(matrixStaging, matrixBuffer, sizeof(glm::mat4) * data.numInstances);
-            }
+            }*/
+            cmdRecorder
+                .bufferUpload(modelMatricesStaging, batch.modelMatricesBuffer_batch, sizeof(glm::mat4) * batch.totalInstances);
 
             // 1. Geometry Pass
             cmdRecorder.setRenderPass(geometryPass, 0)
@@ -495,8 +504,7 @@ int main()
         }
         //update camera data
         camController->update(dt);
-        //update model matrices
-        for (auto& data : modelRenderData) {
+        /*for (auto& data : modelRenderData) {
             auto matrixStaging = data.staging_modelMatrices;
             std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.numInstances};
             for (size_t i = 0; i < matrixData.size(); ++i) {
@@ -505,7 +513,18 @@ int main()
                 matrix = matrix * glm::rotate(glm::mat4(1), angle, glm::vec3(0.,1.,0.));
             }
             data.staging_modelMatrices = matrixStaging;
+        }*/
+
+        
+        //update model matrices
+        std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(modelMatricesStaging)), batch.totalInstances};
+        for (size_t i = 0; i < matrixData.size(); ++i) {
+            auto& matrix = matrixData[i];
+            float angle = glm::radians(1.0f);
+            matrix = matrix * glm::rotate(glm::mat4(1), angle, glm::vec3(0., 1., 0.));
         }
+        //data.staging_modelMatrices = modelMatricesStaging;
+
         // execute the commands recorded in the commandBuffer
         tgai.execute(cmdBuffer);
         // present the current data in the frameBuffer "nextFrame" to the window
