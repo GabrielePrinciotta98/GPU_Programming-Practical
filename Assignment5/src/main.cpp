@@ -14,16 +14,14 @@ struct Light {
     alignas(16) glm::vec3 lightPos = glm::vec3(0);
     alignas(16) glm::vec4 lightColor = glm::vec4(0);
 };
-
-struct Transform {
-    alignas(16) glm::mat4 transform = glm::mat4(1);  // model world pos (model matrix)
-};
-
-//struct ConfigData {
-//    glm::vec3 pos{0, 0, 0}, offsets{0, 0, 0};
-//    float scale{0};
-//    uint32_t amount{0};
+//
+//struct Transform {
+//    alignas(16) glm::mat4 transform = glm::mat4(1);  // model world pos (model matrix)
 //};
+struct BoundingBox {
+    glm::vec3 min;
+    glm::vec3 max;
+};
 
 struct ConfigData {
     glm::vec3 center{0, 0, 0};
@@ -34,13 +32,17 @@ struct ConfigData {
 
 // data for each model
 struct ModelData {
+    std::vector<tga::Vertex> vertexList;
+    std::vector<uint32_t> indexList;
     ConfigData cfg;
     tga::StagingBuffer staging_modelMatrices;
     tga::Buffer modelMatrices;
     tga::Buffer vertexBuffer, indexBuffer;
     uint32_t indexCount{0};
     tga::Texture colorTex;
+    BoundingBox bb;
 };
+
 
 // A little helper function to create a staging buffer that acts like a specific type
 template <typename T>
@@ -98,6 +100,7 @@ int main()
 
 #pragma region load model data
     std::unordered_map<std::filesystem::path, ModelData> modelData;
+
     // std::cout << std::filesystem::current_path() << std::endl;
     for (auto entry : std::filesystem::directory_iterator{std::filesystem::current_path() / "input"}) {
         if (!entry.is_regular_file()) continue;
@@ -117,8 +120,6 @@ int main()
              Delimited by white space
              */
             auto& cfg = modelData[entry.path().stem()].cfg;
-            /*config >> cfg.pos.x >> cfg.pos.y >> cfg.pos.z;
-            config >> cfg.offsets.x >> cfg.offsets.y >> cfg.offsets.z;*/
             config >> cfg.center.x >> cfg.center.y >> cfg.center.z;
             config >> cfg.radius;
             config >> cfg.scale;
@@ -135,6 +136,8 @@ int main()
 
             auto& data = modelData[entry.path().stem()];
 
+            data.vertexList = obj.vertexBuffer;
+            data.indexList = obj.indexBuffer;
             data.vertexBuffer = makeBuffer(tga::BufferUsage::vertex, obj.vertexBuffer);
             data.indexBuffer = makeBuffer(tga::BufferUsage::index, obj.indexBuffer);
             data.indexCount = obj.indexBuffer.size();
@@ -152,20 +155,28 @@ int main()
     }
 #pragma endregion
 
+#pragma region assigning an object space BB to each mesh and create buffer holding all of them
+    std::vector<BoundingBox> boundingBoxes;
+
+    for (auto& [modelName, data] : modelData) {
+        glm::vec3 min{INFINITY, INFINITY, INFINITY};
+        glm::vec3 max{-INFINITY, -INFINITY, -INFINITY};
+        
+        for (int i = 0; i < data.vertexList.size(); ++i) {
+            glm::vec3 vertex = data.vertexList[i].position;
+            
+            min = glm::min(min, vertex);
+            max = glm::min(max, vertex);
+        }
+
+        data.bb = {min, max};
+        boundingBoxes.push_back(data.bb);
+    }
+
+    tga::Buffer boundingBoxesBuffer = makeBufferFromVector(tgai, tga::BufferUsage::storage, boundingBoxes);
+#pragma endregion
+
 #pragma region create storage buffers for the model matrices of the instances for each model
-    //for (auto& [modelName, data] : modelData) {
-    //    auto matrixStaging = tgai.createStagingBuffer({sizeof(glm::mat4) * data.cfg.amount});
-    //    std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.cfg.amount};
-    //    for (size_t i = 0; i < matrixData.size(); ++i) {
-    //        auto& matrix = matrixData[i];
-    //        glm::vec3 position = data.cfg.pos;        // initial position
-    //        position += float(i) * data.cfg.offsets;  // spawn shifted by offset every loop
-    //        matrix = glm::translate(glm::mat4(1), position) * glm::scale(glm::mat4(1), glm::vec3(data.cfg.scale));
-    //    }
-    //    data.staging_modelMatrices = matrixStaging;
-    //    data.modelMatrices = tgai.createBuffer({tga::BufferUsage::storage, matrixData.size_bytes(), matrixStaging});
-    //    // tgai.free(matrixStaging);
-    //}
 
     for (auto& [modelName, data] : modelData) {
         auto matrixStaging = tgai.createStagingBuffer({sizeof(glm::mat4) * data.cfg.amount});
@@ -194,7 +205,6 @@ int main()
         }
         data.staging_modelMatrices = matrixStaging;
         data.modelMatrices = tgai.createBuffer({tga::BufferUsage::storage, matrixData.size_bytes(), matrixStaging});
-        // tgai.free(matrixStaging);
     }
 
 #pragma endregion
