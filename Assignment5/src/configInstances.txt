@@ -1,0 +1,4 @@
+//model_name - n_instances - starting pos - scaling factor
+man - 3 - (1.0, 1.0, 2.0) - 2.0
+transporter - 3 - (1.0, 1.0, 4.0) - 1.2
+ 			
