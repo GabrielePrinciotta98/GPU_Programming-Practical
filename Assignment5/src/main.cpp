@@ -19,11 +19,18 @@ struct Transform {
     alignas(16) glm::mat4 transform = glm::mat4(1);  // model world pos (model matrix)
 };
 
+//struct ConfigData {
+//    glm::vec3 pos{0, 0, 0}, offsets{0, 0, 0};
+//    float scale{0};
+//    uint32_t amount{0};
+//};
+
 struct ConfigData {
-    glm::vec3 pos{0, 0, 0}, offsets{0, 0, 0};
-    float scale{0};
+    glm::vec3 center{0, 0, 0};
+    float scale{0}, radius{0};
     uint32_t amount{0};
 };
+
 
 // data for each model
 struct ModelData {
@@ -102,16 +109,18 @@ int main()
             /*
              * Config file is in this format:
              *
-            posX posY posZ
-            offX offY offZ
+            cenX cenY cenZ
+            radius
             scale
             instanceAmount
              *
              Delimited by white space
              */
             auto& cfg = modelData[entry.path().stem()].cfg;
-            config >> cfg.pos.x >> cfg.pos.y >> cfg.pos.z;
-            config >> cfg.offsets.x >> cfg.offsets.y >> cfg.offsets.z;
+            /*config >> cfg.pos.x >> cfg.pos.y >> cfg.pos.z;
+            config >> cfg.offsets.x >> cfg.offsets.y >> cfg.offsets.z;*/
+            config >> cfg.center.x >> cfg.center.y >> cfg.center.z;
+            config >> cfg.radius;
             config >> cfg.scale;
             config >> cfg.amount;
         } else if (extension == ".obj") {
@@ -144,19 +153,50 @@ int main()
 #pragma endregion
 
 #pragma region create storage buffers for the model matrices of the instances for each model
+    //for (auto& [modelName, data] : modelData) {
+    //    auto matrixStaging = tgai.createStagingBuffer({sizeof(glm::mat4) * data.cfg.amount});
+    //    std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.cfg.amount};
+    //    for (size_t i = 0; i < matrixData.size(); ++i) {
+    //        auto& matrix = matrixData[i];
+    //        glm::vec3 position = data.cfg.pos;        // initial position
+    //        position += float(i) * data.cfg.offsets;  // spawn shifted by offset every loop
+    //        matrix = glm::translate(glm::mat4(1), position) * glm::scale(glm::mat4(1), glm::vec3(data.cfg.scale));
+    //    }
+    //    data.staging_modelMatrices = matrixStaging;
+    //    data.modelMatrices = tgai.createBuffer({tga::BufferUsage::storage, matrixData.size_bytes(), matrixStaging});
+    //    // tgai.free(matrixStaging);
+    //}
+
     for (auto& [modelName, data] : modelData) {
         auto matrixStaging = tgai.createStagingBuffer({sizeof(glm::mat4) * data.cfg.amount});
         std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.cfg.amount};
+        float angleStep; 
+        if ((data.cfg.amount / data.cfg.radius) <= 2)
+            angleStep = 360 / data.cfg.amount;  // Calculate the angle step between objects
+        else
+            angleStep = 360 / data.cfg.amount * 2;
         for (size_t i = 0; i < matrixData.size(); ++i) {
             auto& matrix = matrixData[i];
-            glm::vec3 position = data.cfg.pos;        // initial position
-            position += float(i) * data.cfg.offsets;  // spawn shifted by offset every loop
+            float angle = i * angleStep;
+            float radius; 
+            if (angle >= 360) {
+                radius = data.cfg.radius + 4;
+            } else {
+                radius = data.cfg.radius;
+            }
+            glm::vec3 center = data.cfg.center; 
+            float posX = center.x + radius * glm::cos(glm::radians(angle));
+            float posY = center.y;
+            float posZ = center.z + radius * glm::sin(glm::radians(angle));
+            glm::vec3 position{posX, posY, posZ};
+            
             matrix = glm::translate(glm::mat4(1), position) * glm::scale(glm::mat4(1), glm::vec3(data.cfg.scale));
         }
         data.staging_modelMatrices = matrixStaging;
         data.modelMatrices = tgai.createBuffer({tga::BufferUsage::storage, matrixData.size_bytes(), matrixStaging});
         // tgai.free(matrixStaging);
     }
+
 #pragma endregion
 
 #pragma region initialize camera controller and create camera buffer
