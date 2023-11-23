@@ -15,7 +15,7 @@ struct Light {
     alignas(16) glm::vec4 lightColor = glm::vec4(0);
 };
 //
-//struct Transform {
+// struct Transform {
 //    alignas(16) glm::mat4 transform = glm::mat4(1);  // model world pos (model matrix)
 //};
 struct BoundingBox {
@@ -28,7 +28,6 @@ struct ConfigData {
     float scale{0}, radius{0};
     uint32_t amount{0};
 };
-
 
 // data for each model
 struct ModelData {
@@ -43,6 +42,16 @@ struct ModelData {
     BoundingBox bb;
 };
 
+
+// data for each model used in rendering loop 
+struct ModelRenderData {
+    tga::Buffer vertexBuffer, indexBuffer;
+    tga::StagingBuffer staging_modelMatrices;
+    tga::Buffer modelMatrices;
+    tga::InputSet gpuData;
+    uint32_t indexCount;
+    uint32_t numInstances;
+};
 
 // A little helper function to create a staging buffer that acts like a specific type
 template <typename T>
@@ -70,6 +79,8 @@ auto makeBufferFromVector = [](tga::Interface& tgai, tga::BufferUsage usage, aut
     return buffer;
 };
 
+void rotateInstances(std::vector<ModelRenderData>& modelRenderData, tga::Interface& tgai);
+
 int main()
 {
     std::cout << "GPU Pro\n";
@@ -96,6 +107,9 @@ int main()
     const std::string fragShader_PostProcessing_Path = "../shaders/postProcessing_frag.spv";
     tga::Shader vertexShaderTexToScreen = tga::loadShader(vertexShader_TexToScreen_Path, tga::ShaderType::vertex, tgai);
     tga::Shader fragShaderPostProc = tga::loadShader(fragShader_PostProcessing_Path, tga::ShaderType::fragment, tgai);
+
+    const std::string compShader_frustumCulling = "../shaders/frustumCulling_comp.spv";
+    tga::Shader compShaderFrustumCulling = tga::loadShader(compShader_frustumCulling, tga::ShaderType::compute, tgai);
 #pragma endregion
 
 #pragma region load model data
@@ -155,25 +169,26 @@ int main()
     }
 #pragma endregion
 
-#pragma region assigning an object space BB to each mesh and create buffer holding all of them
-    std::vector<BoundingBox> boundingBoxes;
+#pragma region assigning an object space BB to each mesh
+    //std::vector<BoundingBox> boundingBoxes;
 
     for (auto& [modelName, data] : modelData) {
         glm::vec3 min{INFINITY, INFINITY, INFINITY};
         glm::vec3 max{-INFINITY, -INFINITY, -INFINITY};
-        
+
         for (int i = 0; i < data.vertexList.size(); ++i) {
             glm::vec3 vertex = data.vertexList[i].position;
-            
+
             min = glm::min(min, vertex);
             max = glm::min(max, vertex);
         }
 
         data.bb = {min, max};
-        boundingBoxes.push_back(data.bb);
+        
+        //boundingBoxes.push_back(data.bb);
     }
 
-    tga::Buffer boundingBoxesBuffer = makeBufferFromVector(tgai, tga::BufferUsage::storage, boundingBoxes);
+    //tga::Buffer boundingBoxesBuffer = makeBufferFromVector(tgai, tga::BufferUsage::storage, boundingBoxes);
 #pragma endregion
 
 #pragma region create storage buffers for the model matrices of the instances for each model
@@ -181,7 +196,7 @@ int main()
     for (auto& [modelName, data] : modelData) {
         auto matrixStaging = tgai.createStagingBuffer({sizeof(glm::mat4) * data.cfg.amount});
         std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.cfg.amount};
-        float angleStep; 
+        float angleStep;
         if ((data.cfg.amount / data.cfg.radius) <= 2)
             angleStep = 360 / data.cfg.amount;  // Calculate the angle step between objects
         else
@@ -189,18 +204,18 @@ int main()
         for (size_t i = 0; i < matrixData.size(); ++i) {
             auto& matrix = matrixData[i];
             float angle = i * angleStep;
-            float radius; 
+            float radius;
             if (angle >= 360) {
                 radius = data.cfg.radius + 4;
             } else {
                 radius = data.cfg.radius;
             }
-            glm::vec3 center = data.cfg.center; 
+            glm::vec3 center = data.cfg.center;
             float posX = center.x + radius * glm::cos(glm::radians(angle));
             float posY = center.y;
             float posZ = center.z + radius * glm::sin(glm::radians(angle));
             glm::vec3 position{posX, posY, posZ};
-            
+
             matrix = glm::translate(glm::mat4(1), position) * glm::scale(glm::mat4(1), glm::vec3(data.cfg.scale));
         }
         data.staging_modelMatrices = matrixStaging;
@@ -208,6 +223,8 @@ int main()
     }
 
 #pragma endregion
+
+
 
 #pragma region initialize camera controller and create camera buffer
     const glm::vec3 startPosition = glm::vec3(0.f, 2.f, 0.f);
@@ -301,14 +318,7 @@ int main()
     tga::InputSet inputSetCamera_geometryPass = tgai.createInputSet({geometryPass, {tga::Binding{cameraData, 0}}, 0});
 
     // inputSets vertex buffer, index buffer, diffuse tex, # of indeces and # of instances for each model
-    struct ModelRenderData {
-        tga::Buffer vertexBuffer, indexBuffer;
-        tga::StagingBuffer staging_modelMatrices;
-        tga::Buffer modelMatrices;
-        tga::InputSet gpuData;
-        uint32_t indexCount;
-        uint32_t numInstances;
-    };
+    
     // An std::unordered_map is a linked list, so traversal is relatively inefficient
     // For more efficient iteration during command buffer recording, store the necessary data in a compact vector
     std::vector<ModelRenderData> modelRenderData;
@@ -361,24 +371,43 @@ int main()
             // initialize a commandRecorder to start recording commands
             tga::CommandRecorder cmdRecorder = tga::CommandRecorder{tgai, cmdBuffer};
 
-            // Upload the camera data and make sure the upload is finished before starting the vertex shader
+            // Upload the updated camera data and make sure the upload is finished before starting the vertex shader
             cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
                 .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
 
+            // Upload the updated model matrices data and make sure the upload is finished before starting the vertex shader
             for (auto& data : modelRenderData) {
                 auto matrixStaging = data.staging_modelMatrices;
                 auto matrixBuffer = data.modelMatrices;
-                cmdRecorder.bufferUpload(matrixStaging, matrixBuffer, sizeof(glm::mat4) * data.numInstances);
+                cmdRecorder.bufferUpload(matrixStaging, matrixBuffer, sizeof(glm::mat4) * data.numInstances)
+                    .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
             }
+
+
+
+            //TODO: COMPUTE PASS
+
+
+#pragma region initialize draw indirect commands with different amount of instances (visible objects) every loop
+            std::vector<tga::DrawIndexedIndirectCommand> indirectCommands;
+
+            for (auto& data : modelRenderData) {
+                // IMPORTANT: in the future numInstances will be given by the computePass based on visibility
+                indirectCommands.push_back({data.indexCount, data.numInstances, 0, 0, 0});
+            }
+
+            tga::Buffer indirectDrawBuffer = makeBufferFromVector(tgai, tga::BufferUsage::indirect, indirectCommands);
+#pragma endregion
 
             // 1. Geometry Pass
             cmdRecorder.setRenderPass(geometryPass, 0).bindInputSet(inputSetCamera_geometryPass);
+
 
             for (auto& data : modelRenderData) {
                 cmdRecorder.bindVertexBuffer(data.vertexBuffer)
                     .bindIndexBuffer(data.indexBuffer)
                     .bindInputSet(data.gpuData)
-                    .drawIndexed(data.indexCount, 0, 0, data.numInstances);
+                    .drawIndexedIndirect(indirectDrawBuffer, indirectCommands.size());
             }
 
             // 2. Lighting Pass
@@ -403,26 +432,35 @@ int main()
             // Need to reset the command buffer before re-using it
             tgai.waitForCompletion(cmdBuffer);
         }
-        // update camera data
-        camController->update(dt);
-        // update model matrices
-        for (auto& data : modelRenderData) {
-            auto matrixStaging = data.staging_modelMatrices;
-            std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)),
-                                            data.numInstances};
-            for (size_t i = 0; i < matrixData.size(); ++i) {
-                auto& matrix = matrixData[i];
-                float angle = glm::radians(1.0f);
-                matrix = matrix * glm::rotate(glm::mat4(1), angle, glm::vec3(0., 1., 0.));
-            }
-            data.staging_modelMatrices = matrixStaging;
-        }
         // execute the commands recorded in the commandBuffer
         tgai.execute(cmdBuffer);
         // present the current data in the frameBuffer "nextFrame" to the window
         tgai.present(window, nextFrame);
+
+
+        #pragma region update data every frame 
+        // update camera data
+        camController->update(dt);
+        // update model matrices
+        rotateInstances(modelRenderData, tgai);
+        #pragma endregion
+
     }
 #pragma endregion
 
     return 0;
+}
+
+void rotateInstances(std::vector<ModelRenderData>& modelRenderData, tga::Interface& tgai)
+{
+    for (auto& data : modelRenderData) {
+        auto matrixStaging = data.staging_modelMatrices;
+        std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.numInstances};
+        for (size_t i = 0; i < matrixData.size(); ++i) {
+            auto& matrix = matrixData[i];
+            float angle = glm::radians(1.0f);
+            matrix = matrix * glm::rotate(glm::mat4(1), angle, glm::vec3(0., 1., 0.));
+        }
+        data.staging_modelMatrices = matrixStaging;
+    }
 }

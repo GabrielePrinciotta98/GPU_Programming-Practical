@@ -1,0 +1,40 @@
+#version 460
+
+
+struct BoundingBox {
+    vec3 min;
+    vec3 max;
+}bb;
+
+layout(set = 0, binding = 0) uniform CameraData{
+    vec3 cameraWorldPos;
+    mat4 view;
+    mat4 projection;
+}camera;
+
+layout(set = 1, binding = 0) buffer ModelData{
+    mat4 transforms[]; 
+} model;
+
+layout(set = 1, binding = 1) buffer VisibilityBuffer {
+    int visibilityFlags[]; // Array of visibility flags (0 if not visible, 1 if visible)
+};
+
+
+void main() {
+    uint instanceID = gl_GlobalInvocationID.x; // Assuming 1D dispatch for simplicity
+
+    // Transform the bounding box to clip space
+    mat4 currentTransform = model.transforms[instanceID];
+    vec4 minNDC = camera.projection * camera.view * currentTransform * vec4(bb.min, 1);        
+    vec4 maxNDC = camera.projection * camera.view * currentTransform * vec4(bb.max, 1);
+    
+    // Check if the bounding box is visible in clip space
+    bool isVisible = false;
+    if (minNDC.x >= 1 || maxNDC.x <= -1 || minNDC.y >= 1 || maxNDC.y <= -1 || minNDC.z > 1 || maxNDC.z < 0){
+        isVisible = true;
+    }
+
+    // Set visibility flag in the buffer
+    visibilityFlags[instanceID] = isVisible ? 1 : 0;
+}
