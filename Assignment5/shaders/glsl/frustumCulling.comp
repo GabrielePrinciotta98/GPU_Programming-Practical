@@ -1,29 +1,34 @@
 #version 460
 
-
-struct BoundingBox {
-    vec3 min;
-    vec3 max;
-}bb;
-
 layout(set = 0, binding = 0) uniform CameraData{
     vec3 cameraWorldPos;
     mat4 view;
     mat4 projection;
 }camera;
 
-layout(set = 1, binding = 0) buffer ModelData{
+layout(set = 1, binding = 0) readonly buffer ModelData{
     mat4 transforms[]; 
 } model;
 
-layout(set = 1, binding = 1) buffer VisibilityBuffer {
-    int visibilityFlags[]; // Array of visibility flags (0 if not visible, 1 if visible)
+layout(set = 1, binding = 1) uniform BoundingBox {
+    vec3 min;
+    vec3 max;
+}bb;
+
+layout(set = 1, binding = 2) uniform Size{
+    uint size;
+};
+
+layout(set = 1, binding = 3) writeonly buffer VisibilityBuffer {
+    uint visibilityFlags[]; // Array of visibility flags (0 if not visible, 1 if visible)
 };
 
 
+layout(local_size_x = 64) in;
+
 void main() {
     uint instanceID = gl_GlobalInvocationID.x; // Assuming 1D dispatch for simplicity
-
+    if (instanceID >= size) return;  
     // Transform the bounding box to clip space
     mat4 currentTransform = model.transforms[instanceID];
     vec4 minNDC = camera.projection * camera.view * currentTransform * vec4(bb.min, 1);        

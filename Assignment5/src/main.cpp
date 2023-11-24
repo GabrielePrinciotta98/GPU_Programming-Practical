@@ -29,6 +29,10 @@ struct ConfigData {
     uint32_t amount{0};
 };
 
+struct Size {
+    uint32_t size;
+};
+
 // data for each model
 struct ModelData {
     std::vector<tga::Vertex> vertexList;
@@ -39,7 +43,11 @@ struct ModelData {
     tga::Buffer vertexBuffer, indexBuffer;
     uint32_t indexCount{0};
     tga::Texture colorTex;
-    BoundingBox bb;
+    tga::Buffer bbData; //buffer holding reference to bounding box of this mesh
+    tga::Buffer size; //buffer holding number of instances of this mesh, used as size for the computePass problem 
+    //(in the lopp BufferDownload(visibilityBuffer, visibilityStaging)
+    tga::StagingBuffer visibilityStaging; //staging buffer to get the output of the computeShader
+    tga::Buffer visibilityBuffer; //buffer holding array of 0/1 flags  
 };
 
 
@@ -48,7 +56,8 @@ struct ModelRenderData {
     tga::Buffer vertexBuffer, indexBuffer;
     tga::StagingBuffer staging_modelMatrices;
     tga::Buffer modelMatrices;
-    tga::InputSet gpuData;
+    tga::InputSet computeInputSet; //inputSet for compute pass
+    tga::InputSet geometryInputSet; //inputSet for geometry pass (1st pass)
     uint32_t indexCount;
     uint32_t numInstances;
 };
@@ -138,6 +147,8 @@ int main()
             config >> cfg.radius;
             config >> cfg.scale;
             config >> cfg.amount;
+            Size s{cfg.amount};
+            modelData[entry.path().stem()].size = makeBufferFromStruct(tgai, tga::BufferUsage::uniform, s);
         } else if (extension == ".obj") {
             auto obj = tga::loadObj(entry.path().string());
             auto makeBuffer = [&](tga::BufferUsage usage, auto& vec) {
@@ -155,6 +166,7 @@ int main()
             data.vertexBuffer = makeBuffer(tga::BufferUsage::vertex, obj.vertexBuffer);
             data.indexBuffer = makeBuffer(tga::BufferUsage::index, obj.indexBuffer);
             data.indexCount = obj.indexBuffer.size();
+            
         } else {
             auto stem = entry.path().stem().string();
             auto pos = stem.find('_');
@@ -183,13 +195,19 @@ int main()
             max = glm::min(max, vertex);
         }
 
-        data.bb = {min, max};
-        
+        BoundingBox bb{min, max};
+        data.bbData = makeBufferFromStruct(tgai, tga::BufferUsage::uniform, bb);
         //boundingBoxes.push_back(data.bb);
     }
 
     //tga::Buffer boundingBoxesBuffer = makeBufferFromVector(tgai, tga::BufferUsage::storage, boundingBoxes);
 #pragma endregion
+
+    for (auto& [modelName, data] : modelData) {
+        size_t visibilityBufferSize = data.cfg.amount * sizeof(uint32_t);
+        data.visibilityBuffer = tgai.createBuffer({tga::BufferUsage::storage, visibilityBufferSize});
+        data.visibilityStaging = tgai.createStagingBuffer({visibilityBufferSize});
+    }
 
 #pragma region create storage buffers for the model matrices of the instances for each model
 
@@ -258,6 +276,17 @@ int main()
     tga::Buffer indexBuffer_quad = makeBufferFromVector(tgai, tga::BufferUsage::index, quadIndices);
 #pragma endregion
 
+#pragma region computePass initialization
+    tga::InputLayout inputLayoutComputePass({
+        // Set = 0: Camera data
+        {tga::BindingType::uniformBuffer},
+        // Set = 1: Transform data, Bounding Box data, Size data (# of instances of current mesh), visibilityBuffer
+        {tga::BindingType::storageBuffer, tga::BindingType::uniformBuffer, tga::BindingType::uniformBuffer, tga::BindingType::storageBuffer},
+    });
+   
+    tga::ComputePass computePass = tgai.createComputePass({compShaderFrustumCulling, inputLayoutComputePass});
+#pragma endregion
+
 #pragma region 1st renderPass initialization
     // create inputLayout for the first renderPass
     tga::InputLayout inputLayoutGeometryPass({// Set = 0: Camera data
@@ -313,7 +342,9 @@ int main()
 
 #pragma region create input sets
 
-#pragma region inputSets 1st
+#pragma region inputSets 1st and computePass
+    // inputeSet camera for compute pass
+    tga::InputSet inputSetCamera_computePass = tgai.createInputSet({geometryPass, {tga::Binding{cameraData, 0}}, 0});
     // inputeSet camera for 1st pass
     tga::InputSet inputSetCamera_geometryPass = tgai.createInputSet({geometryPass, {tga::Binding{cameraData, 0}}, 0});
 
@@ -326,6 +357,10 @@ int main()
     for (auto& [modelName, data] : modelData) {
         modelRenderData.push_back(
             {data.vertexBuffer, data.indexBuffer, data.staging_modelMatrices, data.modelMatrices,
+             tgai.createInputSet({computePass,
+                                  {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.bbData, 1},
+                                   tga::Binding{data.size, 2}, tga::Binding{data.visibilityBuffer, 3}},
+                                  1}),
              tgai.createInputSet(
                  {geometryPass, {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.colorTex, 1}}, 1}),
              data.indexCount, data.cfg.amount});
@@ -371,6 +406,7 @@ int main()
             // initialize a commandRecorder to start recording commands
             tga::CommandRecorder cmdRecorder = tga::CommandRecorder{tgai, cmdBuffer};
 
+
             // Upload the updated camera data and make sure the upload is finished before starting the vertex shader
             cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
                 .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
@@ -386,6 +422,8 @@ int main()
 
 
             //TODO: COMPUTE PASS
+
+
 
 
 #pragma region initialize draw indirect commands with different amount of instances (visible objects) every loop
@@ -406,7 +444,7 @@ int main()
             for (auto& data : modelRenderData) {
                 cmdRecorder.bindVertexBuffer(data.vertexBuffer)
                     .bindIndexBuffer(data.indexBuffer)
-                    .bindInputSet(data.gpuData)
+                    .bindInputSet(data.geometryInputSet)
                     .drawIndexedIndirect(indirectDrawBuffer, indirectCommands.size());
             }
 
