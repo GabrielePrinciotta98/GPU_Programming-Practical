@@ -14,7 +14,7 @@ layout(set = 0, binding = 0) uniform CameraData{
 
     
 layout(set = 1, binding = 0) buffer ModelData{
-    mat4 transforms[];
+    mat4 transform;
 } model;
 
 // layout(set = 1 , binding = 2) buffer VisibilityBuffer{
@@ -31,7 +31,7 @@ layout(location = 0) out FragData{
 
 void main()
 {
-    mat4 currentTransform = model.transforms[gl_InstanceIndex];
+    mat4 currentTransform = model.transform;
     // Use visibilityFlags array to determine visibility
     // if (visibilityFlags[gl_InstanceIndex] == 0)
     //     return;
