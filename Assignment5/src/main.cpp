@@ -33,6 +33,10 @@ struct Size {
     uint32_t size;
 };
 
+struct Transform {
+    glm::mat4 modelMatrix;
+};
+
 // data for each model
 struct ModelData {
     std::vector<tga::Vertex> vertexList;
@@ -53,6 +57,7 @@ struct ModelData {
 
 // data for each model used in rendering loop 
 struct ModelRenderData {
+    std::string meshName;
     tga::Buffer vertexBuffer, indexBuffer;
     tga::StagingBuffer staging_modelMatrices;
     tga::Buffer modelMatrices;
@@ -60,7 +65,17 @@ struct ModelRenderData {
     tga::InputSet geometryInputSet; //inputSet for geometry pass (1st pass)
     uint32_t indexCount;
     uint32_t numInstances;
+    tga::StagingBuffer visibilityStaging;  // staging buffer to get the output of the computeShader
+    tga::Buffer visibilityBuffer;          // buffer holding array of 0/1 flags
 };
+
+struct InstanceRenderData {
+    tga::Buffer vertexBuffer, indexBuffer;
+    tga::InputSet geometryInputSet;  // inputSet for geometry pass (1st pass)
+    tga::StagingBuffer staging_modelMatrix;
+    tga::Buffer modelMatrix;
+};
+
 
 // A little helper function to create a staging buffer that acts like a specific type
 template <typename T>
@@ -207,6 +222,11 @@ int main()
         size_t visibilityBufferSize = data.cfg.amount * sizeof(uint32_t);
         data.visibilityBuffer = tgai.createBuffer({tga::BufferUsage::storage, visibilityBufferSize});
         data.visibilityStaging = tgai.createStagingBuffer({visibilityBufferSize});
+
+        auto visibility = static_cast<uint32_t *>(tgai.getMapping(data.visibilityStaging));
+        for (uint32_t i = 0; i < data.cfg.amount; ++i) {
+            visibility[i] = 0; //initialize all instances as not visible
+        }
     }
 
 #pragma region create storage buffers for the model matrices of the instances for each model
@@ -342,11 +362,10 @@ int main()
 
 #pragma region create input sets
 
-#pragma region inputSets 1st and computePass
+#pragma region inputSets computePass
     // inputeSet camera for compute pass
-    tga::InputSet inputSetCamera_computePass = tgai.createInputSet({geometryPass, {tga::Binding{cameraData, 0}}, 0});
-    // inputeSet camera for 1st pass
-    tga::InputSet inputSetCamera_geometryPass = tgai.createInputSet({geometryPass, {tga::Binding{cameraData, 0}}, 0});
+    tga::InputSet inputSetCamera_computePass = tgai.createInputSet({computePass, {tga::Binding{cameraData, 0}}, 0});
+    
 
     // inputSets vertex buffer, index buffer, diffuse tex, # of indeces and # of instances for each model
     
@@ -356,16 +375,40 @@ int main()
     modelRenderData.reserve(modelData.size());
     for (auto& [modelName, data] : modelData) {
         modelRenderData.push_back(
-            {data.vertexBuffer, data.indexBuffer, data.staging_modelMatrices, data.modelMatrices,
+            {modelName.string(), data.vertexBuffer, data.indexBuffer, data.staging_modelMatrices, data.modelMatrices,
              tgai.createInputSet({computePass,
                                   {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.bbData, 1},
                                    tga::Binding{data.size, 2}, tga::Binding{data.visibilityBuffer, 3}},
                                   1}),
              tgai.createInputSet(
                  {geometryPass, {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.colorTex, 1}}, 1}),
-             data.indexCount, data.cfg.amount});
+             data.indexCount, data.cfg.amount, data.visibilityStaging, data.visibilityBuffer});
     }
 #pragma endregion
+
+    // inputeSet camera for 1st pass
+    tga::InputSet inputSetCamera_geometryPass = tgai.createInputSet({geometryPass, {tga::Binding{cameraData, 0}}, 0});
+
+    std::vector<InstanceRenderData> instanceRenderData;
+    for (auto& [modelName, data] : modelData) {
+        std::span<Transform> matrixData{static_cast<Transform *>(tgai.getMapping(data.staging_modelMatrices)), data.cfg.amount};
+        for (int i = 0; i < data.cfg.amount; ++i) {
+            tga::StagingBuffer currentModelMatrixStaging =
+                tgai.createStagingBuffer({sizeof(Transform), tga::memoryAccess(matrixData[i])});
+            tga::Buffer currentModelMatrixBuffer =
+                tgai.createBuffer({tga::BufferUsage::storage, sizeof(Transform), currentModelMatrixStaging
+        });
+
+
+            instanceRenderData.push_back({
+                data.vertexBuffer,
+                data.indexBuffer,
+                tgai.createInputSet(
+                    {geometryPass, {tga::Binding{currentModelMatrixBuffer, 0}, tga::Binding{data.colorTex, 1}}, 1}),
+                currentModelMatrixStaging, currentModelMatrixBuffer
+            });
+        }
+    }
 
 #pragma region inputSets 2nd
     // inputSet camera and light for the 2nd pass
@@ -386,8 +429,7 @@ int main()
 #pragma endregion
 
 #pragma region rendering loop
-    // instantiate a commandBuffer
-    std::vector<tga::CommandBuffer> cmdBuffers(tgai.backbufferCount(window));
+    // instantiate a commandBuffer  
     tga::CommandBuffer cmdBuffer{};
 
     // initialize timestamp to get deltaTime
@@ -401,75 +443,96 @@ int main()
 
         // handle to the frameBuffer of the window
         uint32_t nextFrame = tgai.nextFrame(window);
-        tga::CommandBuffer& cmdBuffer = cmdBuffers[nextFrame];
-        if (!cmdBuffer) {
-            // initialize a commandRecorder to start recording commands
-            tga::CommandRecorder cmdRecorder = tga::CommandRecorder{tgai, cmdBuffer};
+     
+        // initialize a commandRecorder to start recording commands
+        tga::CommandRecorder cmdRecorder = tga::CommandRecorder{tgai, cmdBuffer};
 
 
-            // Upload the updated camera data and make sure the upload is finished before starting the vertex shader
-            cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
+        // Upload the updated camera data and make sure the upload is finished before starting the vertex shader
+        cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
+            .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
+
+        // Upload the updated model matrices data and make sure the upload is finished before starting the vertex shader
+        for (auto& data : modelRenderData) {
+            auto matrixStaging = data.staging_modelMatrices;
+            auto matrixBuffer = data.modelMatrices;
+            cmdRecorder.bufferUpload(matrixStaging, matrixBuffer, sizeof(glm::mat4) * data.numInstances)
                 .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
+        }
 
-            // Upload the updated model matrices data and make sure the upload is finished before starting the vertex shader
-            for (auto& data : modelRenderData) {
-                auto matrixStaging = data.staging_modelMatrices;
-                auto matrixBuffer = data.modelMatrices;
-                cmdRecorder.bufferUpload(matrixStaging, matrixBuffer, sizeof(glm::mat4) * data.numInstances)
-                    .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
-            }
+        // Upload the updated model matrices data and make sure the upload is finished before starting the vertex shader
+        for (auto& data : instanceRenderData) {
+            auto matrixStaging = data.staging_modelMatrix;
+            auto matrixBuffer = data.modelMatrix;
+            cmdRecorder.bufferUpload(matrixStaging, matrixBuffer, sizeof(Transform))
+                .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
+        }
 
 
-
-            //TODO: COMPUTE PASS
-
+        //TODO: COMPUTE PASS
+        constexpr auto workGroupSize = 64;
+        for (auto& data : modelRenderData) {
+            cmdRecorder.setComputePass(computePass)
+                .bindInputSet(inputSetCamera_computePass)
+                .bindInputSet(data.computeInputSet)
+                .dispatch((data.numInstances + (workGroupSize - 1)) / workGroupSize, 1, 1)
+                .barrier(tga::PipelineStage::ComputeShader, tga::PipelineStage::Transfer)
+                .bufferDownload(data.visibilityBuffer, data.visibilityStaging, data.numInstances * sizeof(uint32_t))
+                .barrier(tga::PipelineStage::ComputeShader, tga::PipelineStage::VertexShader);
+        }
 
 
 
 #pragma region initialize draw indirect commands with different amount of instances (visible objects) every loop
-            std::vector<tga::DrawIndexedIndirectCommand> indirectCommands;
-
-            for (auto& data : modelRenderData) {
-                // IMPORTANT: in the future numInstances will be given by the computePass based on visibility
-                indirectCommands.push_back({data.indexCount, data.numInstances, 0, 0, 0});
+        std::vector<tga::DrawIndexedIndirectCommand> indirectCommands;
+        std::string title; 
+        for (auto& data : modelRenderData) {
+            uint32_t visibleInstances{0}; 
+            auto visibility = static_cast<uint32_t *>(tgai.getMapping(data.visibilityStaging));
+            for (uint32_t i = 0; i < data.numInstances; ++i) {
+                visibleInstances += visibility[i];  // get the number of visible instances;
+                indirectCommands.push_back({data.indexCount, visibility[i], 0, 0, 0});
+                std::cout << visibility[i] << std::endl;
             }
+            //std::cout << data.meshName + ": " + std::to_string(visibleInstances) << std::endl;
+            title += data.meshName + ": " + std::to_string(visibleInstances) + ",   ";  
+            //indirectCommands.push_back({data.indexCount, visibleInstances, 0, 0, 0});
+        }
+        tgai.setWindowTitle(window, title);
 
-            tga::Buffer indirectDrawBuffer = makeBufferFromVector(tgai, tga::BufferUsage::indirect, indirectCommands);
+        tga::Buffer indirectDrawBuffer = makeBufferFromVector(tgai, tga::BufferUsage::indirect, indirectCommands);
 #pragma endregion
 
-            // 1. Geometry Pass
-            cmdRecorder.setRenderPass(geometryPass, 0).bindInputSet(inputSetCamera_geometryPass);
+        // 1. Geometry Pass
+        cmdRecorder.setRenderPass(geometryPass, 0).bindInputSet(inputSetCamera_geometryPass);
 
 
-            for (auto& data : modelRenderData) {
-                cmdRecorder.bindVertexBuffer(data.vertexBuffer)
-                    .bindIndexBuffer(data.indexBuffer)
-                    .bindInputSet(data.geometryInputSet)
-                    .drawIndexedIndirect(indirectDrawBuffer, indirectCommands.size());
-            }
-
-            // 2. Lighting Pass
-            cmdRecorder.setRenderPass(lightingPass, 0)
-                .bindInputSet(inputSetCameraLight_lightingPass)
-                .bindInputSet(inputSetGBuffer_lightingPass)
-                .bindVertexBuffer(vertexBuffer_quad)
-                .bindIndexBuffer(indexBuffer_quad)
-                .drawIndexed(6, 0, 0);
-
-            // 3. PostProcessing Pass
-            cmdRecorder.setRenderPass(postProcPass, nextFrame)
-                .bindInputSet(inputSetIntermediateRes_postProcPass)
-                .bindVertexBuffer(vertexBuffer_quad)
-                .bindIndexBuffer(indexBuffer_quad)
-                .drawIndexed(6, 0, 0);
-
-            // the command recorder has done recording and can initialize a commandBuffer
-            cmdBuffer = cmdRecorder.endRecording();
-
-        } else {
-            // Need to reset the command buffer before re-using it
-            tgai.waitForCompletion(cmdBuffer);
+        for (auto& data : instanceRenderData) {
+            cmdRecorder.bindVertexBuffer(data.vertexBuffer)
+                .bindIndexBuffer(data.indexBuffer)
+                .bindInputSet(data.geometryInputSet)
+                .drawIndexedIndirect(indirectDrawBuffer, indirectCommands.size());
         }
+
+        // 2. Lighting Pass
+        cmdRecorder.setRenderPass(lightingPass, 0)
+            .bindInputSet(inputSetCameraLight_lightingPass)
+            .bindInputSet(inputSetGBuffer_lightingPass)
+            .bindVertexBuffer(vertexBuffer_quad)
+            .bindIndexBuffer(indexBuffer_quad)
+            .drawIndexed(6, 0, 0);
+
+        // 3. PostProcessing Pass
+        cmdRecorder.setRenderPass(postProcPass, nextFrame)
+            .bindInputSet(inputSetIntermediateRes_postProcPass)
+            .bindVertexBuffer(vertexBuffer_quad)
+            .bindIndexBuffer(indexBuffer_quad)
+            .drawIndexed(6, 0, 0);
+
+        // the command recorder has done recording and can initialize a commandBuffer
+        cmdBuffer = cmdRecorder.endRecording();
+
+        
         // execute the commands recorded in the commandBuffer
         tgai.execute(cmdBuffer);
         // present the current data in the frameBuffer "nextFrame" to the window
