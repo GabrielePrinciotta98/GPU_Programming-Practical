@@ -256,10 +256,11 @@ int main()
         data.indirectDrawBuffer = tgai.createBuffer({tga::BufferUsage::storage | tga::BufferUsage::indirect,
                                                      indirectDrawCommandsBufferSize, data.indirectDrawStaging});
 
+
         auto indirectCommand = static_cast<tga::DrawIndexedIndirectCommand *>(tgai.getMapping(data.indirectDrawStaging));
         for (uint32_t i = 0; i < data.cfg.amount; ++i) {
             
-            //indirectCommand[i] = {data.indexCount, 0, 0, 0, 0};  // initialize all commands with instanceCount = 0
+            //indirectCommand[i] = {data.indexCount, 0, 0, 0, 0};  // initialize all commands for testing
         }
     }
 
@@ -414,6 +415,8 @@ int main()
     std::vector<ModelRenderData> modelRenderData;
     modelRenderData.reserve(modelData.size());
     for (auto& [modelName, data] : modelData) {
+
+       
         tga::InputSet computeInputSet =
             tgai.createInputSet({computePass,
                                  {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.bbData, 1}, tga::Binding{data.size, 2},
@@ -452,6 +455,9 @@ int main()
                 {sizeof(tga::DrawIndexedIndirectCommand), tga::memoryAccess(indirectCommandsData[i])});
             tga::Buffer indirectDrawCommandBuffer = tgai.createBuffer(
                 {tga::BufferUsage::storage | tga::BufferUsage::indirect, sizeof(tga::DrawIndexedIndirectCommand), indirectDrawStagingBuffer});
+
+            //auto test = static_cast<tga::DrawIndexedIndirectCommand*>(tgai.getMapping(indirectDrawStagingBuffer)); 
+            //std::cout << test->indexCount << std::endl;
 
             instanceRenderData.push_back({
                 data.vertexBuffer,
@@ -523,7 +529,7 @@ int main()
 
         
 
-        //TODO: COMPUTE PASS
+        //COMPUTE PASS
         constexpr auto workGroupSize = 64;
         for (auto& data : modelRenderData) {
             cmdRecorder.setComputePass(computePass)
@@ -537,7 +543,7 @@ int main()
 
 
 
-#pragma region initialize draw indirect commands with different amount of instances (visible objects) every loop
+#pragma region use the visibility buffer to print the number of instances on the screen for each mesh
         std::string title; 
         for (auto& data : modelRenderData) {
             uint32_t visibleInstances{0}; 
@@ -547,9 +553,7 @@ int main()
                 //indirectCommands.push_back({data.indexCount, visibility[i], 0, 0, 0});
                 //std::cout << visibility[i] << std::endl;
             }
-            //std::cout << data.meshName + ": " + std::to_string(visibleInstances) << std::endl;
             title += data.meshName + ": " + std::to_string(visibleInstances) + ",   ";  
-            //indirectCommands.push_back({data.indexCount, data.numInstances, 0, 0, 0});
         }
         tgai.setWindowTitle(window, title);
 
