@@ -249,6 +249,20 @@ int main()
         }
     }
 
+    //std::vector<tga::DrawIndexedIndirectCommand> indirectCommands;
+    for (auto& [modelName, data] : modelData) {
+        size_t indirectDrawCommandsBufferSize = data.cfg.amount * sizeof(tga::DrawIndexedIndirectCommand);
+        data.indirectDrawStaging = tgai.createStagingBuffer({indirectDrawCommandsBufferSize});
+        data.indirectDrawBuffer = tgai.createBuffer({tga::BufferUsage::storage | tga::BufferUsage::indirect,
+                                                     indirectDrawCommandsBufferSize, data.indirectDrawStaging});
+
+        auto indirectCommand = static_cast<tga::DrawIndexedIndirectCommand *>(tgai.getMapping(data.indirectDrawStaging));
+        for (uint32_t i = 0; i < data.cfg.amount; ++i) {
+            
+            //indirectCommand[i] = {data.indexCount, 0, 0, 0, 0};  // initialize all commands with instanceCount = 0
+        }
+    }
+
 #pragma region create storage buffers for the model matrices of the instances for each model
 
     for (auto& [modelName, data] : modelData) {
@@ -334,7 +348,7 @@ int main()
     tga::InputLayout inputLayoutGeometryPass({// Set = 0: Camera data
                                               {tga::BindingType::uniformBuffer},
                                               // Set = 1: Transform data, Diffuse Tex
-                                              {tga::BindingType::storageBuffer, tga::BindingType::sampler, tga::BindingType::storageBuffer}});
+                                              {tga::BindingType::storageBuffer, tga::BindingType::sampler}});
 
     // create first renderPass : input loaded data -> output g-buffer (tex list)
     std::vector<tga::Texture> gBufferData;
@@ -384,12 +398,7 @@ int main()
 
 #pragma region create input sets
 
-    std::vector<tga::DrawIndexedIndirectCommand> indirectCommands;
-    for (auto& [modelName, data] : modelData) {
-        size_t indirectDrawCommandsBufferSize = data.cfg.amount * sizeof(tga::DrawIndexedIndirectCommand);
-        data.indirectDrawStaging = tgai.createStagingBuffer({indirectDrawCommandsBufferSize});
-        data.indirectDrawBuffer = tgai.createBuffer({tga::BufferUsage::storage | tga::BufferUsage::indirect, indirectDrawCommandsBufferSize, data.indirectDrawStaging});
-    }
+    
 
         
 
@@ -552,8 +561,8 @@ int main()
 
 
         for (auto& data : instanceRenderData) {
-            auto test = static_cast<tga::DrawIndexedIndirectCommand *>(tgai.getMapping(data.indirectDrawCommandStaging));
-            std::cout << test->indexCount << std::endl;
+            //auto test = static_cast<tga::DrawIndexedIndirectCommand *>(tgai.getMapping(data.indirectDrawCommandStaging));
+            //std::cout << test->indexCount << std::endl;
             cmdRecorder.bindVertexBuffer(data.vertexBuffer)
                 .bindIndexBuffer(data.indexBuffer)
                 .bindInputSet(data.geometryInputSet)

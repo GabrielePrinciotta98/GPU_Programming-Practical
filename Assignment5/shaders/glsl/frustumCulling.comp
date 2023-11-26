@@ -32,7 +32,7 @@ layout(set = 1, binding = 3) writeonly buffer VisibilityBuffer {
     uint visibilityFlags[]; // Array of visibility flags (0 if not visible, 1 if visible)
 };
 
-layout(set = 1, binding = 4) buffer IndirectCommands{
+layout(set = 1, binding = 4) writeonly buffer IndirectCommands{
     IndexedIndirectCommand indirectCommands[];
 };
 
@@ -76,15 +76,15 @@ vec4 corners[8] = {
     }
     
     //setting the indirect command of the current instance
-    IndexedIndirectCommand currentCommand = indirectCommands[instanceID];
-    currentCommand.indexCount = topology.indexCount; 
-    currentCommand.instanceCount = isVisible ? 1 : 0;
-    currentCommand.firstIndex = 0;
-    currentCommand.vertexOffset = 0;
-    currentCommand.firstInstance = 0;
+    //IndexedIndirectCommand currentCommand = indirectCommands[instanceID];
+    indirectCommands[instanceID].indexCount = topology.indexCount; 
+    indirectCommands[instanceID].instanceCount = isVisible ? 1 : 0;
+    indirectCommands[instanceID].firstIndex = 0;
+    indirectCommands[instanceID].vertexOffset = 0;
+    indirectCommands[instanceID].firstInstance = 0;
 
     //needed to display visibility
     visibilityFlags[instanceID] = isVisible ? 1 : 0;
-    //visibilityFlags[instanceID] = currentCommand.indexCount>0 ? 1 : 0;
+    //visibilityFlags[instanceID] = indirectCommands[instanceID].instanceCount;
 
 }
