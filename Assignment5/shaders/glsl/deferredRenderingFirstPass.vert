@@ -17,9 +17,9 @@ layout(set = 1, binding = 0) buffer ModelData{
     mat4 transforms[];
 } model;
 
-layout(set = 1 , binding = 2) buffer VisibilityBuffer{
-    uint visibilityFlags[];
-};
+// layout(set = 1 , binding = 2) buffer VisibilityBuffer{
+//     uint visibilityFlags[];
+// };
 
 layout(location = 0) out FragData{
     vec3 positionWorld;
@@ -32,10 +32,9 @@ layout(location = 0) out FragData{
 void main()
 {
     mat4 currentTransform = model.transforms[gl_InstanceIndex];
-
     // Use visibilityFlags array to determine visibility
-    if (visibilityFlags[gl_InstanceIndex] == 0)
-        return;
+    // if (visibilityFlags[gl_InstanceIndex] == 0)
+    //     return;
 
     // Transform vertex position from object space to world space
     vec4 worldPos = currentTransform * vec4(position, 1);

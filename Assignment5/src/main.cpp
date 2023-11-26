@@ -35,6 +35,10 @@ struct Size {
     uint32_t size;
 };
 
+struct IndexCount {
+    uint32_t indexCount;
+};
+
 struct Transform {
     glm::mat4 modelMatrix;
 };
@@ -48,12 +52,16 @@ struct ModelData {
     tga::Buffer modelMatrices;
     tga::Buffer vertexBuffer, indexBuffer;
     uint32_t indexCount{0};
+    tga::Buffer indexCountBuffer;
     tga::Texture colorTex;
     tga::Buffer bbData; //buffer holding reference to bounding box of this mesh
     tga::Buffer size; //buffer holding number of instances of this mesh, used as size for the computePass problem 
     //(in the lopp BufferDownload(visibilityBuffer, visibilityStaging)
     tga::StagingBuffer visibilityStaging; //staging buffer to get the output of the computeShader
-    tga::Buffer visibilityBuffer; //buffer holding array of 0/1 flags  
+    tga::Buffer visibilityBuffer; //buffer holding array of 0/1 flags
+
+    tga::Buffer indirectDrawBuffer;
+    tga::StagingBuffer indirectDrawStaging;
 };
 
 
@@ -69,6 +77,8 @@ struct ModelRenderData {
     uint32_t numInstances;
     tga::StagingBuffer visibilityStaging;  // staging buffer to get the output of the computeShader
     tga::Buffer visibilityBuffer;          // buffer holding array of 0/1 flags
+    tga::Buffer indirectDrawCommandsBuffer;          // single command per instance
+    tga::StagingBuffer indirectDrawCommandsStaging;  //
 };
 
 struct InstanceRenderData {
@@ -76,6 +86,8 @@ struct InstanceRenderData {
     tga::InputSet geometryInputSet;  // inputSet for geometry pass (1st pass)
     tga::StagingBuffer staging_modelMatrix;
     tga::Buffer modelMatrix;
+    tga::Buffer indirectDrawCommandBuffer; //single command per instance
+    tga::StagingBuffer indirectDrawCommandStaging; //
 };
 
 
@@ -187,6 +199,8 @@ int main()
             data.vertexBuffer = makeBuffer(tga::BufferUsage::vertex, obj.vertexBuffer);
             data.indexBuffer = makeBuffer(tga::BufferUsage::index, obj.indexBuffer);
             data.indexCount = obj.indexBuffer.size();
+
+            data.indexCountBuffer = makeBufferFromStruct(tgai, tga::BufferUsage::uniform, data.indexCount);
             
         } else {
             auto stem = entry.path().stem().string();
@@ -302,12 +316,15 @@ int main()
 #pragma endregion
 
 #pragma region computePass initialization
-    tga::InputLayout inputLayoutComputePass({
-        // Set = 0: Camera data
-        {tga::BindingType::uniformBuffer},
-        // Set = 1: Transform data, Bounding Box data, Size data (# of instances of current mesh), visibilityBuffer
-        {tga::BindingType::storageBuffer, tga::BindingType::uniformBuffer, tga::BindingType::uniformBuffer, tga::BindingType::storageBuffer},
-    });
+    tga::InputLayout inputLayoutComputePass(
+        {// Set = 0: Camera data
+         {tga::BindingType::uniformBuffer},
+         // Set = 1: Transform data, Bounding Box data, Size data (# of instances of current mesh), visibilityBuffer,
+         // indirectDrawCommands, indexCount
+         {tga::BindingType::storageBuffer, tga::BindingType::uniformBuffer, tga::BindingType::uniformBuffer,
+          tga::BindingType::storageBuffer, tga::BindingType::storageBuffer, tga::BindingType::uniformBuffer}
+
+        });
    
     tga::ComputePass computePass = tgai.createComputePass({compShaderFrustumCulling, inputLayoutComputePass});
 #pragma endregion
@@ -367,6 +384,15 @@ int main()
 
 #pragma region create input sets
 
+    std::vector<tga::DrawIndexedIndirectCommand> indirectCommands;
+    for (auto& [modelName, data] : modelData) {
+        size_t indirectDrawCommandsBufferSize = data.cfg.amount * sizeof(tga::DrawIndexedIndirectCommand);
+        data.indirectDrawStaging = tgai.createStagingBuffer({indirectDrawCommandsBufferSize});
+        data.indirectDrawBuffer = tgai.createBuffer({tga::BufferUsage::storage | tga::BufferUsage::indirect, indirectDrawCommandsBufferSize, data.indirectDrawStaging});
+    }
+
+        
+
 #pragma region inputSets computePass
     // inputeSet camera for compute pass
     tga::InputSet inputSetCamera_computePass = tgai.createInputSet({computePass, {tga::Binding{cameraData, 0}}, 0});
@@ -379,16 +405,22 @@ int main()
     std::vector<ModelRenderData> modelRenderData;
     modelRenderData.reserve(modelData.size());
     for (auto& [modelName, data] : modelData) {
+        tga::InputSet computeInputSet =
+            tgai.createInputSet({computePass,
+                                 {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.bbData, 1}, tga::Binding{data.size, 2},
+              tga::Binding{data.visibilityBuffer, 3}, tga::Binding{data.indirectDrawBuffer, 4}, tga::Binding{data.indexCountBuffer, 5}},
+                                 1});
+            
+
+            
+        
         modelRenderData.push_back(
             {modelName.string(), data.vertexBuffer, data.indexBuffer, data.staging_modelMatrices, data.modelMatrices,
-             tgai.createInputSet({computePass,
-                                  {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.bbData, 1},
-                                   tga::Binding{data.size, 2}, tga::Binding{data.visibilityBuffer, 3}},
-                                  1}),
+            computeInputSet,
              tgai.createInputSet({geometryPass,
-                                  {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.colorTex, 1}, tga::Binding{data.visibilityBuffer, 2}},
+                                  {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.colorTex, 1}},
                                   1}),
-             data.indexCount, data.cfg.amount, data.visibilityStaging, data.visibilityBuffer});
+             data.indexCount, data.cfg.amount, data.visibilityStaging, data.visibilityBuffer, data.indirectDrawBuffer, data.indirectDrawStaging});
     }
 #pragma endregion
 
@@ -398,20 +430,26 @@ int main()
     std::vector<InstanceRenderData> instanceRenderData;
     for (auto& [modelName, data] : modelData) {
         std::span<Transform> matrixData{static_cast<Transform *>(tgai.getMapping(data.staging_modelMatrices)), data.cfg.amount};
+        std::span<tga::DrawIndexedIndirectCommand> indirectCommandsData{
+            static_cast<tga::DrawIndexedIndirectCommand *>(tgai.getMapping(data.indirectDrawStaging)), data.cfg.amount};
+        
         for (int i = 0; i < data.cfg.amount; ++i) {
             tga::StagingBuffer currentModelMatrixStaging =
                 tgai.createStagingBuffer({sizeof(Transform), tga::memoryAccess(matrixData[i])});
             tga::Buffer currentModelMatrixBuffer =
-                tgai.createBuffer({tga::BufferUsage::storage, sizeof(Transform), currentModelMatrixStaging
-        });
+                tgai.createBuffer({tga::BufferUsage::storage, sizeof(Transform), currentModelMatrixStaging});
 
+            tga::StagingBuffer indirectDrawStagingBuffer = tgai.createStagingBuffer(
+                {sizeof(tga::DrawIndexedIndirectCommand), tga::memoryAccess(indirectCommandsData[i])});
+            tga::Buffer indirectDrawCommandBuffer = tgai.createBuffer(
+                {tga::BufferUsage::storage | tga::BufferUsage::indirect, sizeof(tga::DrawIndexedIndirectCommand), indirectDrawStagingBuffer});
 
             instanceRenderData.push_back({
                 data.vertexBuffer,
                 data.indexBuffer,
                 tgai.createInputSet(
                     {geometryPass, {tga::Binding{currentModelMatrixBuffer, 0}, tga::Binding{data.colorTex, 1}}, 1}),
-                currentModelMatrixStaging, currentModelMatrixBuffer
+                 currentModelMatrixStaging, currentModelMatrixBuffer, indirectDrawCommandBuffer, indirectDrawStagingBuffer
             });
         }
     }
@@ -474,6 +512,7 @@ int main()
                 .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
         }
 
+        
 
         //TODO: COMPUTE PASS
         constexpr auto workGroupSize = 64;
@@ -490,7 +529,6 @@ int main()
 
 
 #pragma region initialize draw indirect commands with different amount of instances (visible objects) every loop
-        std::vector<tga::DrawIndexedIndirectCommand> indirectCommands;
         std::string title; 
         for (auto& data : modelRenderData) {
             uint32_t visibleInstances{0}; 
@@ -502,22 +540,24 @@ int main()
             }
             //std::cout << data.meshName + ": " + std::to_string(visibleInstances) << std::endl;
             title += data.meshName + ": " + std::to_string(visibleInstances) + ",   ";  
-            indirectCommands.push_back({data.indexCount, data.numInstances, 0, 0, 0});
+            //indirectCommands.push_back({data.indexCount, data.numInstances, 0, 0, 0});
         }
         tgai.setWindowTitle(window, title);
 
-        tga::Buffer indirectDrawBuffer = makeBufferFromVector(tgai, tga::BufferUsage::indirect, indirectCommands);
+        //tga::Buffer indirectDrawBuffer = makeBufferFromVector(tgai, tga::BufferUsage::indirect, indirectCommands);
 #pragma endregion
 
         // 1. Geometry Pass
         cmdRecorder.setRenderPass(geometryPass, 0).bindInputSet(inputSetCamera_geometryPass);
 
 
-        for (auto& data : modelRenderData) {
+        for (auto& data : instanceRenderData) {
+            auto test = static_cast<tga::DrawIndexedIndirectCommand *>(tgai.getMapping(data.indirectDrawCommandStaging));
+            std::cout << test->indexCount << std::endl;
             cmdRecorder.bindVertexBuffer(data.vertexBuffer)
                 .bindIndexBuffer(data.indexBuffer)
                 .bindInputSet(data.geometryInputSet)
-                .drawIndexedIndirect(indirectDrawBuffer, indirectCommands.size());
+                .drawIndexedIndirect(data.indirectDrawCommandBuffer, 1);
         }
 
         // 2. Lighting Pass
