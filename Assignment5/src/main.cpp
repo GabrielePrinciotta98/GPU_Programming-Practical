@@ -24,8 +24,10 @@ struct BoundingBox {
 };
 
 struct ConfigData {
-    glm::vec3 center{0, 0, 0};
-    float scale{0}, radius{0};
+    glm::vec3 initialPosition{0, 0, 0};
+    float xstep{0}, ystep{0}; 
+    float scale{0};
+    uint32_t maxInstancesPerRow{0};
     uint32_t amount{0};
 };
 
@@ -150,17 +152,21 @@ int main()
             /*
              * Config file is in this format:
              *
-            cenX cenY cenZ
-            radius
+            posX posY posZ
+            xstep
+            ystep
             scale
+            maxInstancesPerRow
             instanceAmount
              *
              Delimited by white space
              */
             auto& cfg = modelData[entry.path().stem()].cfg;
-            config >> cfg.center.x >> cfg.center.y >> cfg.center.z;
-            config >> cfg.radius;
+            config >> cfg.initialPosition.x >> cfg.initialPosition.y >> cfg.initialPosition.z;
+            config >> cfg.xstep;
+            config >> cfg.ystep;
             config >> cfg.scale;
+            config >> cfg.maxInstancesPerRow;
             config >> cfg.amount;
             Size s{cfg.amount};
             modelData[entry.path().stem()].size = makeBufferFromStruct(tgai, tga::BufferUsage::uniform, s);
@@ -234,28 +240,27 @@ int main()
     for (auto& [modelName, data] : modelData) {
         auto matrixStaging = tgai.createStagingBuffer({sizeof(glm::mat4) * data.cfg.amount});
         std::span<glm::mat4> matrixData{static_cast<glm::mat4 *>(tgai.getMapping(matrixStaging)), data.cfg.amount};
-        float angleStep;
-        if ((data.cfg.amount / data.cfg.radius) <= 2)
-            angleStep = 360 / data.cfg.amount;  // Calculate the angle step between objects
-        else
-            angleStep = 360 / data.cfg.amount * 2;
-        for (size_t i = 0; i < matrixData.size(); ++i) {
-            auto& matrix = matrixData[i];
-            float angle = i * angleStep;
-            float radius;
-            if (angle >= 360) {
-                radius = data.cfg.radius + 4;
-            } else {
-                radius = data.cfg.radius;
-            }
-            glm::vec3 center = data.cfg.center;
-            float posX = center.x + radius * glm::cos(glm::radians(angle));
-            float posY = center.y;
-            float posZ = center.z + radius * glm::sin(glm::radians(angle));
-            glm::vec3 position{posX, posY, posZ};
 
-            matrix = glm::translate(glm::mat4(1), position) * glm::scale(glm::mat4(1), glm::vec3(data.cfg.scale));
+        float xStep = data.cfg.xstep;
+        float yStep = data.cfg.ystep;
+        glm::vec3 initialPosition = data.cfg.initialPosition;
+        size_t maxInstancesPerRow = data.cfg.maxInstancesPerRow;
+
+        size_t rowCount = static_cast<size_t>(std::ceil(static_cast<float>(data.cfg.amount) / maxInstancesPerRow));
+
+        for (size_t row = 0; row < rowCount; ++row) {
+            size_t instancesInThisRow = std::min(maxInstancesPerRow, data.cfg.amount - row * maxInstancesPerRow);
+
+            for (size_t col = 0; col < instancesInThisRow; ++col) {
+                auto& matrix = matrixData[row * maxInstancesPerRow + col];
+
+                // Calculate position based on row, column, and steps
+                glm::vec3 position = initialPosition + glm::vec3(col * xStep, 0.0f, row * yStep);
+
+                matrix = glm::translate(glm::mat4(1), position) * glm::scale(glm::mat4(1), glm::vec3(data.cfg.scale));
+            }
         }
+
         data.staging_modelMatrices = matrixStaging;
         data.modelMatrices = tgai.createBuffer({tga::BufferUsage::storage, matrixData.size_bytes(), matrixStaging});
     }
@@ -312,7 +317,7 @@ int main()
     tga::InputLayout inputLayoutGeometryPass({// Set = 0: Camera data
                                               {tga::BindingType::uniformBuffer},
                                               // Set = 1: Transform data, Diffuse Tex
-                                              {tga::BindingType::storageBuffer, tga::BindingType::sampler}});
+                                              {tga::BindingType::storageBuffer, tga::BindingType::sampler, tga::BindingType::storageBuffer}});
 
     // create first renderPass : input loaded data -> output g-buffer (tex list)
     std::vector<tga::Texture> gBufferData;
@@ -380,8 +385,9 @@ int main()
                                   {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.bbData, 1},
                                    tga::Binding{data.size, 2}, tga::Binding{data.visibilityBuffer, 3}},
                                   1}),
-             tgai.createInputSet(
-                 {geometryPass, {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.colorTex, 1}}, 1}),
+             tgai.createInputSet({geometryPass,
+                                  {tga::Binding{data.modelMatrices, 0}, tga::Binding{data.colorTex, 1}, tga::Binding{data.visibilityBuffer, 2}},
+                                  1}),
              data.indexCount, data.cfg.amount, data.visibilityStaging, data.visibilityBuffer});
     }
 #pragma endregion
@@ -491,12 +497,12 @@ int main()
             auto visibility = static_cast<uint32_t *>(tgai.getMapping(data.visibilityStaging));
             for (uint32_t i = 0; i < data.numInstances; ++i) {
                 visibleInstances += visibility[i];  // get the number of visible instances;
-                indirectCommands.push_back({data.indexCount, visibility[i], 0, 0, 0});
-                std::cout << visibility[i] << std::endl;
+                //indirectCommands.push_back({data.indexCount, visibility[i], 0, 0, 0});
+                //std::cout << visibility[i] << std::endl;
             }
             //std::cout << data.meshName + ": " + std::to_string(visibleInstances) << std::endl;
             title += data.meshName + ": " + std::to_string(visibleInstances) + ",   ";  
-            //indirectCommands.push_back({data.indexCount, visibleInstances, 0, 0, 0});
+            indirectCommands.push_back({data.indexCount, data.numInstances, 0, 0, 0});
         }
         tgai.setWindowTitle(window, title);
 
@@ -507,7 +513,7 @@ int main()
         cmdRecorder.setRenderPass(geometryPass, 0).bindInputSet(inputSetCamera_geometryPass);
 
 
-        for (auto& data : instanceRenderData) {
+        for (auto& data : modelRenderData) {
             cmdRecorder.bindVertexBuffer(data.vertexBuffer)
                 .bindIndexBuffer(data.indexBuffer)
                 .bindInputSet(data.geometryInputSet)
