@@ -8,3 +8,6 @@ Assignment 3: 5/5
    
 Assignment 4: 4/5
  - (-1) No runtime addition of models
+
+Assignment 5: 3/5
+ - (-1) number of visible objects is calculated on the CPU (better: atomicAdd on GPU)
