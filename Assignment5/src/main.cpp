@@ -535,12 +535,17 @@ int main()
             cmdRecorder.setComputePass(computePass)
                 .bindInputSet(inputSetCamera_computePass)
                 .bindInputSet(data.computeInputSet)
-                .dispatch((data.numInstances + (workGroupSize - 1)) / workGroupSize, 1, 1)
-                .barrier(tga::PipelineStage::ComputeShader, tga::PipelineStage::Transfer)
-                .bufferDownload(data.visibilityBuffer, data.visibilityStaging, data.numInstances * sizeof(uint32_t))
-                .barrier(tga::PipelineStage::ComputeShader, tga::PipelineStage::VertexShader);
+                .dispatch((data.numInstances + (workGroupSize - 1)) / workGroupSize, 1, 1);
+   
+        }
+        cmdRecorder.barrier(tga::PipelineStage::ComputeShader, tga::PipelineStage::Transfer);
+
+        for (auto& data : modelRenderData) {
+            cmdRecorder.bufferDownload(data.visibilityBuffer, data.visibilityStaging,
+                                       data.numInstances * sizeof(uint32_t));
         }
 
+        cmdRecorder.barrier(tga::PipelineStage::ComputeShader, tga::PipelineStage::VertexShader);
 
 
 #pragma region use the visibility buffer to print the number of instances on the screen for each mesh
@@ -564,13 +569,15 @@ int main()
         cmdRecorder.setRenderPass(geometryPass, 0).bindInputSet(inputSetCamera_geometryPass);
 
 
+        int counter = 0;
         for (auto& data : instanceRenderData) {
             //auto test = static_cast<tga::DrawIndexedIndirectCommand *>(tgai.getMapping(data.indirectDrawCommandStaging));
             //std::cout << test->indexCount << std::endl;
             cmdRecorder.bindVertexBuffer(data.vertexBuffer)
                 .bindIndexBuffer(data.indexBuffer)
                 .bindInputSet(data.geometryInputSet)
-                .drawIndexedIndirect(data.indirectDrawCommandBuffer, 1);
+                .drawIndexedIndirect(data.indirectDrawCommandBuffer, 1, counter * sizeof(tga::DrawIndexedIndirectCommand));
+            counter++;
         }
 
         // 2. Lighting Pass
