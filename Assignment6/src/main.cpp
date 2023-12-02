@@ -21,6 +21,11 @@ struct Transform {
     glm::mat4 modelMatrix = glm::mat4(1);
 };
 
+struct ScreenData {
+    uint32_t width;
+    uint32_t height;
+};
+
 struct ModelData {
     tga::Buffer vertexBuffer;
     tga::Buffer indexBuffer;
@@ -65,9 +70,14 @@ int main()
 #pragma region create window
     auto windowWidth = tgai.screenResolution().first / 6 * 5;
     auto windowHeight = tgai.screenResolution().second / 6 * 5;
+    /*uint32_t windowWidth = tgai.screenResolution().first / 2;
+    uint32_t windowHeight = tgai.screenResolution().second / 2;*/
     /*auto windowWidth = static_cast<uint32_t>(8);
     auto windowHeight = static_cast<uint32_t>(8);*/
     tga::Window window = tgai.createWindow({windowWidth, windowHeight});
+
+    ScreenData screenData{windowWidth, windowHeight};
+    tga::Buffer screenDataBuffer = makeBufferFromStruct(tgai, tga::BufferUsage::uniform, screenData);
 #pragma endregion
 
 #pragma region load shaders
@@ -90,7 +100,7 @@ int main()
 #pragma endregion
 
 #pragma region initialize model transforms
-    glm::vec3 worldPos_man = glm::vec3(3.0f, 0.0f, 3.0f);
+    glm::vec3 worldPos_man = glm::vec3(0.0f, 0.0f, 3.0f);
     Transform objTransform_man;
     objTransform_man.modelMatrix = glm::translate(glm::mat4(1.0f), worldPos_man) * glm::scale(glm::mat4(1), glm::vec3(0.02));
 #pragma endregion
@@ -100,7 +110,7 @@ int main()
 #pragma endregion
 
 #pragma region initialize camera controller and create camera buffer
-    const glm::vec3 startPosition = glm::vec3(0.f, 2.f, 0.f);
+    const glm::vec3 startPosition = glm::vec3(0.f, 2.f, 6.f);
     float aspectRatio = windowWidth / static_cast<float>(windowHeight);
     std::unique_ptr<CameraController> camController = std::make_unique<CameraController>(
         tgai, window, 60, aspectRatio, 0.1f, 30000.f, startPosition, glm::vec3{0, 0, 1}, glm::vec3{0, 1, 0});
@@ -124,8 +134,8 @@ int main()
 
 #pragma region computePass initialization
     tga::InputLayout inputLayoutComputePass(
-        {// Set = 0: Image data, Camera data, Random Tex
-         {tga::BindingType::storageImage, tga::BindingType::uniformBuffer, tga::BindingType::storageImage},
+        {// Set = 0: Image data, Camera data, ScreenRes data, (Random Tex)
+         {tga::BindingType::storageImage, tga::BindingType::uniformBuffer, tga::BindingType::uniformBuffer, tga::BindingType::storageImage},
          // Set = 1 : Vertex List, Index List
          {tga::BindingType::storageBuffer, tga::BindingType::storageBuffer}
         });
@@ -153,7 +163,7 @@ int main()
     std::uniform_real_distribution<float> dis(0.0f, 1.0f);  // Adjust the range as needed
 
     // Specify the size of your vector
-    size_t vectorSize = randTexSide*randTexSide*4;  // Adjust the size as needed
+    size_t vectorSize = windowWidth*windowHeight*4;  // Adjust the size as needed
 
     // Create a vector and fill it with random floats
     std::vector<float> randomFloats(vectorSize);
@@ -165,11 +175,17 @@ int main()
     tga::StagingBuffer randomTexStaging =
         tgai.createStagingBuffer({vectorSize * sizeof(float), tga::memoryAccess(randomFloats)});
 
-    tga::Texture randomTex = tgai.createTexture({randTexSide, randTexSide, tga::Format::r32g32b32a32_sfloat, tga::SamplerMode::nearest, tga::AddressMode::clampEdge, tga::TextureType::_2D, 0, randomTexStaging});
-    tga::Texture outputTex = tgai.createTexture({randTexSide, randTexSide, tga::Format::r32g32b32a32_sfloat});
+    tga::Texture randomTex =
+        tgai.createTexture({windowWidth, windowHeight, tga::Format::r32g32b32a32_sfloat, tga::SamplerMode::nearest,
+                            tga::AddressMode::clampEdge, tga::TextureType::_2D, 0, randomTexStaging});
+    
+    tga::Texture outputTex = tgai.createTexture({windowWidth, windowHeight, tga::Format::r32g32b32a32_sfloat});
 
     tga::InputSet inputSetCameraTexturesComputePass =
-        tgai.createInputSet({computePass, {tga::Binding{outputTex, 0}, tga::Binding{cameraData, 1}, tga::Binding{randomTex, 2}}, 0});
+        tgai.createInputSet({computePass,
+                             {tga::Binding{outputTex, 0}, tga::Binding{cameraData, 1},
+                              tga::Binding{screenDataBuffer, 2}, tga::Binding{randomTex, 3}},
+                             0});
 
     std::vector<glm::vec3> vertices;
     for (int i = 0; i < obj.vertexBuffer.size(); ++i) {
@@ -225,9 +241,12 @@ int main()
         //// Upload the updated camera data and make sure the upload is finished before starting the vertex shader
         //cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
         //    .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
-        cmdRecorder.setComputePass(computePass).bindInputSet(inputSetCameraTexturesComputePass)
-            .bindInputSet(inputSetVertexIndexComputePass).
-            dispatch(windowWidth, windowHeight, 1);
+        constexpr auto workGroupSize = 8; 
+        cmdRecorder.setComputePass(computePass)
+            .bindInputSet(inputSetCameraTexturesComputePass)
+            .bindInputSet(inputSetVertexIndexComputePass)
+            .dispatch((windowWidth + (workGroupSize - 1)) / workGroupSize,
+                      (windowHeight + (workGroupSize - 1)) / workGroupSize, 1);
 
 
 
