@@ -1,0 +1,134 @@
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+
+layout(set = 0, binding = 0, rgba32f) uniform image2D ImageBuffer;
+
+
+layout(set = 0, binding = 1) uniform CameraData{
+    vec3 cameraWorldPos;
+    mat4 viewMatrix;
+    mat4 projectionMatrix;
+};
+
+layout(set = 0, binding = 2, rgba32f) uniform image2D randomValues;
+
+layout(set = 1, binding = 0) buffer Vertices {
+    vec3 vertices[];
+};
+
+layout(set = 1, binding = 1) buffer Indices {
+    uvec3 indices[];
+};
+
+
+
+
+const vec3 backgroundColor = vec3(0.0, 0.0, 0.0);
+const int maxBounces = 3;
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+// Function to check intersection with a triangle
+vec3 triIntersect(in vec3 ro, in vec3 rd, in vec3 v0, in vec3 v1, in vec3 v2) {
+    vec3 v1v0 = v1 - v0;
+    vec3 v2v0 = v2 - v0;
+    vec3 rov0 = ro - v0;
+    vec3 n = cross(v1v0, v2v0);
+    vec3 q = cross(rov0, rd);
+    float d = 1.0 / dot(rd, n);
+    float u = d * dot(-q, v2v0);
+    float v = d * dot(q, v1v0);
+    float t = d * dot(-n, rov0);
+    if (u < 0.0 || v < 0.0 || (u + v) > 1.0)
+        t = -1.0;
+    return vec3(t, u, v);
+}
+
+void main() {
+    ivec2 storePos = ivec2(gl_GlobalInvocationID.xy);
+    vec2 pixelNDC = 2. * storePos -1.;  //Map to screen space back to NDC
+    vec3 pixelViewSpace = (inverse(projectionMatrix) * vec4(pixelNDC, 1.,1.)).xyz; //Project back to ViewSpace using inverse projection matrix
+
+    // Primary ray generation
+    Ray primaryRay;
+    primaryRay.origin = cameraWorldPos; //ray origin = camera world position
+    primaryRay.direction = normalize(mat3(inverse(viewMatrix)) * pixelViewSpace); //Project back to WorldSpace using inverse view matrix
+
+
+    vec3 color = backgroundColor;
+
+// Monte Carlo ray tracing with random bouncing
+    for (int bounce = 0; bounce < maxBounces; ++bounce) {
+        // Find the closest intersection with the mesh
+        float closestT = 1e30;
+        int closestIndex = -1;
+
+        for (int i = 0; i < indices.length(); i++) {
+            vec3 v0 = vertices[indices[i].x];
+            vec3 v1 = vertices[indices[i].y];
+            vec3 v2 = vertices[indices[i].z];
+
+            vec3 intersection = triIntersect(primaryRay.origin, primaryRay.direction, v0, v1, v2);
+            float t = intersection.x;
+
+            if (t > 0.0 && t < closestT) {
+                closestT = t;
+                closestIndex = i;
+            }
+        }
+
+        // If an intersection is found, update ray and accumulate color
+        if (closestIndex != -1) {
+            vec3 hitPoint = primaryRay.origin + primaryRay.direction * closestT;
+            vec3 v0 = vertices[indices[closestIndex].x];
+            vec3 v1 = vertices[indices[closestIndex].y];
+            vec3 v2 = vertices[indices[closestIndex].z];
+            vec3 normal = normalize(cross(v1 - v0, v2 - v0)); // Compute the normal of the triangle
+            
+            // Example shading: Lambertian reflection
+            vec3 randomVec = imageLoad(randomValues, storePos % 8).rgb;
+            vec3 newDirection = normalize(normal + randomVec);
+            primaryRay.origin = hitPoint + 0.001 * newDirection;
+            primaryRay.direction = newDirection;
+
+            // Accumulate color (for simplicity, just use white)
+            color += vec3(1.0, 1.0, 1.0);
+        } else {
+            break; // No intersection found, terminate the loop
+        }
+    }
+
+    // Store the accumulated color in the image buffer
+    imageStore(ImageBuffer, storePos, vec4(color / float(maxBounces), 1.0));
+
+
+
+
+   
+    // // Find the intersection with the triangle
+    //     vec3 v2 = vec3(-1.0, 1.5, 1.0);
+    //     vec3 v1 = vec3(0.0, 2.5, 1.0);
+    //     vec3 v0 = vec3(1.0, 1.5, 1.0);
+
+    //     vec3 intersection = triIntersect(primaryRay.origin, primaryRay.direction, v0, v1, v2);
+    //     float t = intersection.x;
+
+    //     // If an intersection is found, update ray and accumulate color
+    //     if (t > 0.0) {
+    //         // Accumulate color (for simplicity, just use white)
+    //         color = vec3(1.0, 1.0, 1.0);
+    //     }
+    //     else
+    //         color = vec3(1.0, 0, 0);
+    // Store the accumulated color in the image buffer
+    // imageStore(ImageBuffer, storePos, vec4(color / float(maxBounces), 1.0));
+    imageStore(ImageBuffer, storePos, vec4(color, 1.0));
+    
+    
+    //imageStore(ImageBuffer, storePos, vec4(imageLoad(randomValues, storePos).rgb , 1.0));
+}
