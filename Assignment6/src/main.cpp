@@ -68,12 +68,11 @@ int main()
     tga::Interface tgai;
 
 #pragma region create window
-    auto windowWidth = tgai.screenResolution().first / 6 * 5;
-    auto windowHeight = tgai.screenResolution().second / 6 * 5;
-    /*uint32_t windowWidth = tgai.screenResolution().first / 2;
-    uint32_t windowHeight = tgai.screenResolution().second / 2;*/
-    /*auto windowWidth = static_cast<uint32_t>(8);
-    auto windowHeight = static_cast<uint32_t>(8);*/
+    /*auto windowWidth = tgai.screenResolution().first / 6 * 5;
+    auto windowHeight = tgai.screenResolution().second / 6 * 5;*/
+    uint32_t windowWidth = tgai.screenResolution().first / 4;
+    uint32_t windowHeight = tgai.screenResolution().second / 4;
+    
     tga::Window window = tgai.createWindow({windowWidth, windowHeight});
 
     ScreenData screenData{windowWidth, windowHeight};
@@ -92,25 +91,25 @@ int main()
 
 #pragma region load model data 
     //assuming only one mesh for simplicity
-    tga::Obj obj = tga::loadObj("../../../Data/man/man.obj"); //using "man.obj"
+    tga::Obj obj = tga::loadObj("../../../Data/teapot/teapot.obj"); //using "man.obj"
     tga::Buffer vertexBuffer = makeBufferFromVector(tgai, tga::BufferUsage::vertex, obj.vertexBuffer);
     tga::Buffer indexBuffer = makeBufferFromVector(tgai, tga::BufferUsage::index, obj.indexBuffer);
-    const std::string diffuseTexRelPath = "../../../Data/man/man_diffuse.png";
-    tga::TextureBundle diffuseTex = tga::loadTexture(diffuseTexRelPath, tga::Format::r8g8b8a8_srgb, tga::SamplerMode::nearest, tgai);
+    //const std::string diffuseTexRelPath = "../../../Data/man/man_diffuse.png";
+    //tga::TextureBundle diffuseTex = tga::loadTexture(diffuseTexRelPath, tga::Format::r8g8b8a8_srgb, tga::SamplerMode::nearest, tgai);
 #pragma endregion
 
 #pragma region initialize model transforms
-    glm::vec3 worldPos_man = glm::vec3(0.0f, 0.0f, 3.0f);
+    glm::vec3 worldPos_man = glm::vec3(0.0f, 0.0f, 10.0f);
     Transform objTransform_man;
-    objTransform_man.modelMatrix = glm::translate(glm::mat4(1.0f), worldPos_man) * glm::scale(glm::mat4(1), glm::vec3(0.02));
+    objTransform_man.modelMatrix = glm::translate(glm::mat4(1.0f), worldPos_man) * glm::scale(glm::mat4(1), glm::vec3(0.001));
 #pragma endregion
 
 #pragma region initialize modelData
-    ModelData modelData = {vertexBuffer, indexBuffer, objTransform_man, diffuseTex};
+    //ModelData modelData = {vertexBuffer, indexBuffer, objTransform_man, diffuseTex};
 #pragma endregion
 
 #pragma region initialize camera controller and create camera buffer
-    const glm::vec3 startPosition = glm::vec3(0.f, 2.f, 6.f);
+    const glm::vec3 startPosition = glm::vec3(0.f, 2.f, -5.f);
     float aspectRatio = windowWidth / static_cast<float>(windowHeight);
     std::unique_ptr<CameraController> camController = std::make_unique<CameraController>(
         tgai, window, 60, aspectRatio, 0.1f, 30000.f, startPosition, glm::vec3{0, 0, 1}, glm::vec3{0, 1, 0});
@@ -238,17 +237,17 @@ int main()
         tga::CommandRecorder cmdRecorder = tga::CommandRecorder{tgai, cmdBuffer};
 
 
-        //// Upload the updated camera data and make sure the upload is finished before starting the vertex shader
-        //cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
-        //    .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::VertexShader);
-        constexpr auto workGroupSize = 8; 
+        // Upload the updated camera data and make sure the upload is finished before starting the vertex shader
+        cmdRecorder.bufferUpload(camController->Data(), cameraData, sizeof(Camera))
+            .barrier(tga::PipelineStage::Transfer, tga::PipelineStage::ComputeShader);
+        constexpr auto workGroupSize = 32; 
         cmdRecorder.setComputePass(computePass)
             .bindInputSet(inputSetCameraTexturesComputePass)
             .bindInputSet(inputSetVertexIndexComputePass)
             .dispatch((windowWidth + (workGroupSize - 1)) / workGroupSize,
                       (windowHeight + (workGroupSize - 1)) / workGroupSize, 1);
 
-
+        cmdRecorder.barrier(tga::PipelineStage::ComputeShader, tga::PipelineStage::VertexShader);
 
         cmdRecorder.setRenderPass(renderPass, nextFrame)
             .bindVertexBuffer(vertexBuffer_quad)
@@ -268,7 +267,7 @@ int main()
 
         #pragma region update data every frame 
         // update camera data
-        //camController->update(dt);
+        camController->update(dt);
         #pragma endregion
 
     }
