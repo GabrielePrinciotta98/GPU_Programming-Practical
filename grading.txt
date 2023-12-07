@@ -11,3 +11,8 @@ Assignment 4: 4/5
 
 Assignment 5: 4/5
  - (-1) number of visible objects is calculated on the CPU (better: atomicAdd on GPU)
+ 
+ 
+ Assignment 6: 3/5
+ - (-1) does not do accumulation over time
+ - (-1) does not do reprojection on camera movement
