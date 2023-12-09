@@ -1,0 +1,598 @@
+#version 460
+
+// 64 threads per work group
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct Triangle{
+    vec3 v0;
+    vec3 v1;
+    vec3 v2;
+};
+
+// BVH Node Definition
+struct BVHNode {
+    vec3 min;
+    vec3 max;
+    int left; // Index of the left child or index of the first triangle for leaf nodes
+    int right; // Index of the right child or number of triangles for leaf nodes
+};
+
+layout(set = 2, binding = 0) readonly buffer BVHBuffer {
+    BVHNode bvhNodes[];
+};
+
+layout(set = 2, binding = 1) readonly buffer Triangles{
+    Triangle at[];
+}triangles;
+
+// Ping-Pong textures to accumulate results
+layout(set = 1, binding = 0, rgba16f) uniform image2D tex;
+layout(set = 1, binding = 1) uniform sampler2D prevTex;
+
+
+layout(set = 1, binding = 2) uniform Camera{
+    mat4 view;
+    mat4 toWorld;
+    mat4 projection;
+    mat4 ndcToView;
+}cam;
+
+layout(set = 1, binding = 3) uniform PrevCamera{
+    mat4 view;
+    mat4 toWorld;
+    mat4 projection;
+    mat4 ndcToView;
+}prevCam;
+
+// Position textures to test whether re-using samples is ok
+layout(set = 1, binding = 4, rgba16f) uniform image2D posTex;
+layout(set = 1, binding = 5) uniform sampler2D prevPosTex;
+
+
+// Current frame number and potentially other information (e.g. time)
+layout(set = 0, binding = 0) uniform SceneData{
+    uint frame;
+}scene;
+
+
+layout(set = 0, binding = 1) readonly buffer VertexBuffer{
+    float at[];
+} vertexBuffer;
+
+// Vertex data is packed together, use helper function to extract floats
+vec3 fetchVertex(uint index){
+    index*=3;
+    return vec3(vertexBuffer.at[index],vertexBuffer.at[index+1],vertexBuffer.at[index+2]);
+}
+
+layout(set = 0, binding = 2) readonly buffer IndexBuffer{
+    uint at[];
+} indexBuffer;
+
+// Defines a model
+struct DrawIndexedIndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+};
+layout(set = 0, binding = 3) readonly buffer DrawCommands{
+    DrawIndexedIndirectCommand at[];
+}drawCommands;
+
+// Attribibutes other than position
+struct VertexAttribute{
+    vec2 texCoords;
+    vec3 normal;
+};
+
+layout(set = 0, binding = 4) readonly buffer VertexAttributeBuffer{
+    float at[];
+} vertexAttributesBuffer;
+
+// Vertex Attribute Data is also tightly packed
+VertexAttribute fetchAttribute(uint index){
+
+    index *= (2+3); // 2 float uv, 3 float normal
+    VertexAttribute va;
+    va.texCoords = vec2(vertexAttributesBuffer.at[index],vertexAttributesBuffer.at[index+1]);
+    va.normal = vec3(vertexAttributesBuffer.at[index+2],vertexAttributesBuffer.at[index+3],vertexAttributesBuffer.at[index+4]);
+    return va;
+}
+
+
+// Some constants used for lighting calculation
+const vec3 sunColor =  2.*vec3(1.64, 1.27, 0.99);
+const vec3 sunDirection = vec3(1,0.75,1);
+const vec3 skyColorLow = vec3(0.36, 0.45, 0.57);
+const vec3 skyColorHigh = vec3(0.14, 0.21, 0.49);
+const vec3 voidColor = vec3(0.025, 0.05, 0.075);
+// The sky
+vec3 skyLight(vec3 rd){ // Fine tuned by pure arbitrariness
+    if(rd.y < 0.0)
+        return vec3(0);
+    const float skyGradient = 1./4.;
+    vec3 skyColor = mix(skyColorLow, skyColorHigh, pow(rd.y, skyGradient));
+    return skyColor;
+}
+
+// Technically also "spherical light source"
+vec3 sunLight(vec3 rd){
+    vec3 L = normalize(sunDirection);
+    float sunAmount =max(dot(rd,L), 0.);
+    return sunColor*sunAmount;
+}
+// When a ray doesn't hit anything
+vec3 backgroundColor(vec3 rd){
+    vec3 L = normalize(sunDirection);
+    const float sunGradient = 1400.;
+    float sunAmount = pow(max(dot(rd,L), 0.),sunGradient);
+    return sunColor*sunAmount + skyLight(rd);
+}
+
+//https://www.reedbeta.com/blog/hash-functions-for-gpu-rendering/
+// Gives random numbers between 0 and 2^32-1
+uint pcg_hash( inout uint seed)
+{
+    uint state = seed * 747796405u + 2891336453u;
+    seed = state;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// random number between 0 and 1
+float frand(inout uint seed)
+{
+    // Divide by 2^32-1
+    return float(pcg_hash(seed)*(1.lf / 4294967295.lf)); // long float aka. double precision division since a regular float can't represent 32 bit integers without loss
+}
+
+// https://www.shadertoy.com/view/MsdGzl
+vec3 cosineDirection( in vec3 nor, inout uint seed)
+{
+    float u = frand(seed);
+    float v = frand(seed);
+    // method 3 by fizzer: http://www.amietia.com/lambertnotangent.html
+    float a = 6.2831853*v; float b = 2.0*u-1.0;
+    vec3 dir = vec3(sqrt(1.0-b*b)*vec2(cos(a),sin(a)),b);
+    return normalize( nor + dir );
+}
+
+// Ball
+struct Sphere{
+    vec3 center;
+    float radius;
+    vec3 color;
+};
+
+// return closest hit – < 0 if no hit
+float sphereIntersect(vec3 ro, vec3 rd, Sphere s){
+    ro -= s.center;
+    float b = dot(ro,rd);
+    float c = dot(ro,ro) - s.radius*s.radius;
+    float d = b*b - c;
+    if(d < 0.0) return -1.; // No intersection
+    d = sqrt(d);
+    float t1 = -b - d;
+    float t2 = -b + d;
+    if(t1 < 0.0) return t2; // Potentially inside
+    return t1;
+}
+
+// To fill the empty void with some more objects
+Sphere[] spheres = Sphere[](
+    Sphere(sunDirection*vec3(-1,1,-1)*50,10, 10*sunColor), // A little sun
+    Sphere(vec3(-2.5,0,4),0.4,0.9*vec3(1.64, 1.27, 0.99)), // An even smaller light source
+    Sphere(vec3(2,1,2.75),1.5,vec3(0.1,0.9,0.3)),
+    Sphere(vec3(-2.0,1.5, -3.5),1.5,vec3(0.8,0.8,0.8)),
+    Sphere(vec3(-0.5,0.0, -2.0),0.6,vec3(0.3,0.8,0.3)),
+    Sphere(vec3( 1.0,0.7, -2.2),0.8,vec3(0.3,0.8,0.8)),
+    Sphere(vec3( 0.7, -0.3, -1.2),0.2,vec3(0.8,0.8,0.3)),
+    Sphere(vec3(-0.7, -0.3, -1.2),0.2,vec3(0.8,0.3,0.3)),
+    Sphere(vec3( 0.2, -0.2, -1.2),0.3,vec3(0.8,0.3,0.8))
+);
+
+
+// Find t for plane defined by normal vector n and point p
+float planeIntersect(vec3 ro, vec3 rd, vec3 n, vec3 p){
+return dot(p-ro,n)/dot(rd,n);}
+
+// triangle degined by vertices v0, v1 and  v2
+vec3 triIntersect( vec3 ro, vec3 rd, vec3 v0, vec3 v1, vec3 v2 )
+{
+    vec3 v1v0 = v1 - v0;
+    vec3 v2v0 = v2 - v0;
+    vec3 rov0 = ro - v0;
+    vec3  n = cross( v1v0, v2v0 );
+    vec3  q = cross( rov0, rd );
+    float d = 1.0/dot( rd, n );
+    float u = d*dot( -q, v2v0 );
+    float v = d*dot(  q, v1v0 );
+    float t = d*dot( -n, rov0 );
+    if( u<0.0 || v<0.0 || (u+v)>1.0 ) t = -1.0;
+    return vec3( t, u, v );
+}
+
+
+// Tests the ray against the models in the scene
+float modelIntersect(vec3 ro, vec3 rd, out vec2 bary, out uvec3 triIndices){
+    // This holds information on which vertices to draw
+    DrawIndexedIndirectCommand drawCmd = drawCommands.at[0];
+
+    // initialize t 
+    float txmax = 1./0.;
+    float t = txmax;
+    for(uint i = drawCmd.firstIndex; i < drawCmd.indexCount; i+=3){
+        // Grab the indices
+        uvec3 indices = uvec3(
+            indexBuffer.at[i+0]+drawCmd.vertexOffset,
+            indexBuffer.at[i+1]+drawCmd.vertexOffset,
+            indexBuffer.at[i+2]+drawCmd.vertexOffset
+        );
+        // fetch the vertices
+        vec3 v0 = fetchVertex(indices.x);
+        vec3 v1 = fetchVertex(indices.y);
+        vec3 v2 = fetchVertex(indices.z);
+        // Test whether there is an intersection
+        vec3 tuv = triIntersect(ro,rd,v0,v1,v2);
+        // On hit, update information
+        if(tuv.x > 0 && tuv.x < t){
+            t = tuv.x;
+            bary = tuv.yz;
+            triIndices = indices;
+        }
+    }
+
+    if(t == txmax) return -1;
+    return t;
+}
+
+
+// Function to traverse the BVH and find the closest intersection
+float traverseBVH(vec3 ro, vec3 rd, int nodeIndex, out vec3 flatNormal) {
+    // This holds information on which vertices to draw
+    DrawIndexedIndirectCommand drawCmd = drawCommands.at[0];
+
+    
+    float t = -1.0;
+
+    // Traverse the BVH
+    while (nodeIndex >= 0) {
+        BVHNode node = bvhNodes[nodeIndex];
+
+        // Perform ray-box intersection test
+        float txmin = (node.min.x - ro.x) / rd.x;
+        float txmax = (node.max.x - ro.x) / rd.x;
+
+        if (txmin > txmax) {
+            float temp = txmin;
+            txmin = txmax;
+            txmax = temp;
+        }
+
+        float tymin = (node.min.y - ro.y) / rd.y;
+        float tymax = (node.max.y - ro.y) / rd.y;
+
+        if (tymin > tymax) {
+            float temp = tymin;
+            tymin = tymax;
+            tymax = temp;
+        }
+
+        if ((txmin > tymax) || (tymin > txmax)) {
+            break;
+        }
+
+        if (tymin > txmin) {
+            txmin = tymin;  
+        }
+
+        if (tymax < txmax) {
+            txmax = tymax;
+        }
+
+        float tzmin = (node.min.z - ro.z) / rd.z;
+        float tzmax = (node.max.z - ro.z) / rd.z;
+
+        if (tzmin > tzmax) {
+            float temp = tzmin;
+            tzmin = tzmax;
+            tzmax = temp;
+        }
+
+        if ((txmin > tzmax) || (tzmin > txmax)) {
+            break;
+        }
+
+        if (tzmin > txmin) {
+            txmin = tzmin;
+        }
+
+        if (tzmax < txmax) {
+            txmax = tzmax;
+        }
+
+        // Leaf node
+        if (node.left < 0) {
+            
+            // Intersect with triangles in the leaf node
+            for (int i = -node.left; i < node.right; i++) {
+                // vec3 v0 = fetchVertex(indices[i].x);
+                // vec3 v1 = fetchVertex(indices[i].y);
+                // vec3 v2 = fetchVertex(indices[i].z);
+
+                vec3 v0 = triangles.at[i].v0;
+                vec3 v1 = triangles.at[i].v1;
+                vec3 v2 = triangles.at[i].v2;
+
+
+                vec3 tuv = triIntersect(ro, rd, v0, v1, v2);
+                if (tuv.x > 0.0 && (tuv.x < t || t < 0.0)) {
+                    t = tuv.x;
+                    //bary = tuv.yz;
+                    flatNormal = normalize(cross(v1-v0, v2-v0)); //using a per face normal for simplicity
+                }
+            }
+
+            // Move to the next BVH node in the stack
+            nodeIndex = -1;
+        } else {
+            // Non-leaf node, choose the next child to visit
+            int nearChild = (txmin > tymin) ? ((txmin > tzmin) ? 0 : 2) : ((tymin > tzmin) ? 1 : 2);
+            int farChild = (txmax < tymax) ? ((txmin < tzmin) ? 2 : 0) : ((txmin < tzmin) ? 1 : 0);
+
+            if (txmin > txmax) {
+                int temp = nearChild;
+                nearChild = farChild;
+                farChild = temp;
+            }
+
+            float tnear = txmin > 0.0 ? txmin : txmax; // Entry point
+
+            // First, push the far child onto the stack
+            if (farChild != -1) {
+                nodeIndex = farChild;
+            }
+
+            // Then, continue with the near child
+            if (nearChild != -1) {
+                nodeIndex = nearChild;
+            }
+        }
+    }
+
+    return t;
+}
+
+
+// simplified test to only check whether there is any hit at all
+// Test two ray directions at once to improve performance
+// Does not check the plane because the plane doesn't cast any shadows
+bvec2 anyHit2(vec3 ro, vec3 rd0,vec3 rd1){
+
+    bvec2 hit = bvec2(false);
+    for(uint s = 0 ; s < spheres.length(); ++s){
+        hit.x = hit.x || sphereIntersect(ro,rd0,spheres[s]) > 0;
+        hit.y = hit.y || sphereIntersect(ro,rd1,spheres[s]) > 0;
+        if(hit.x && hit.y) 
+            return hit;
+    }
+
+    DrawIndexedIndirectCommand drawCmd = drawCommands.at[0];
+
+    for(uint i = drawCmd.firstIndex; i < drawCmd.indexCount; i+=3){
+        uvec3 indices = uvec3(
+            indexBuffer.at[i+0]+drawCmd.vertexOffset,
+            indexBuffer.at[i+1]+drawCmd.vertexOffset,
+            indexBuffer.at[i+2]+drawCmd.vertexOffset
+        );
+        vec3 v0 = fetchVertex(indices.x);
+        vec3 v1 = fetchVertex(indices.y);
+        vec3 v2 = fetchVertex(indices.z);
+
+        vec3 tuv0 = triIntersect(ro,rd0,v0,v1,v2);
+        vec3 tuv1 = triIntersect(ro,rd1,v0,v1,v2);
+        hit.x = hit.x || tuv0.x > 0;
+        hit.y = hit.y || tuv1.x > 0;
+        if(hit.x && hit.y) 
+            return hit;
+    }
+
+    return hit;
+}
+
+// samples the light at a specific point
+// This is a form of importance sampling since we shoot rays in directions that are more likely to hit a light source
+vec3 lightAtPoint(vec3 ro, vec3 n, inout uint seed){
+
+    vec3 L = normalize(sunDirection); // TODO: vary slightly for softer shadows
+    vec3 skyDir = cosineDirection(n,seed);
+    vec3 light = vec3(0);
+    bvec2 hits = anyHit2(ro,L,skyDir);
+
+    light += !hits.x?sunLight(n):vec3(0);
+    light += !hits.y?skyLight(n):vec3(0);
+
+    return light;
+}
+
+
+
+// checkerboard pattern based on position of point with a centerline
+vec3 checkerboard(vec3 point, float tileSize){
+    vec2 p = point.xz / tileSize;
+    vec2 t = floor(p+0.5);
+    if(t.x == 0.0 || t.y == 0.0)
+        return vec3(0.9,0.7,0.3);
+    return mix(vec3(0.5),vec3(.01),mod(t.x+t.y,2.));
+}
+
+
+
+// Intersects the entire scene and returns useful information
+float sceneIntersect(vec3 ro, vec3 rd, out vec3 normal, out vec3 color){
+    float t = -1;
+    
+    // Ground Plain
+    vec3 planeNormal = normalize(vec3(0.,1.,0.));
+    vec3 planePoint = vec3(0,-0.5,0.);
+    float tPlane = planeIntersect(ro,rd,planeNormal,planePoint);
+    if(tPlane > 0 && (tPlane < t || t < 0)){
+        t = tPlane;
+        vec3 hitPoint = ro+rd*t;
+        normal = planeNormal;
+        color = checkerboard(hitPoint,0.5);
+    }
+
+    // Testing the spheres
+    for(uint s = 0; s < spheres.length();++s){
+        float tSphere = sphereIntersect(ro,rd,spheres[s]);
+        if(tSphere > 0 && (tSphere < t || t < 0)){
+            t = tSphere;
+            vec3 hitPoint = ro+rd*t;
+            normal = normalize(hitPoint-spheres[s].center);
+            color = spheres[s].color;
+        }
+    }
+
+    // Ray Triangle Intersections
+    //vec2 bary;
+    //uvec3 triIndices;
+    // float tModel = modelIntersect(ro,rd,bary,triIndices);
+    // if(tModel > 0 && (tModel < t || t < 0)){
+    //     t = tModel;
+    //     VertexAttribute va0 = fetchAttribute(triIndices.x);
+    //     VertexAttribute va1 = fetchAttribute(triIndices.y);
+    //     VertexAttribute va2 = fetchAttribute(triIndices.z);
+    //     normal = normalize((1-bary.x-bary.y)*va0.normal+bary.x*va1.normal+bary.y*va2.normal);
+    //     // TODO: Interpolate texture coordinates and sample texture
+    //     vec3 objColor = vec3(0.6,0.1,0.55);
+    //     color = objColor;
+    // }
+
+
+
+    // BVH Intersections
+    vec3 flatNormal;
+    float tModel = traverseBVH(ro, rd, 0, flatNormal);
+    if(tModel > 0 && (tModel < t || t < 0)){
+        t = tModel;
+        // VertexAttribute va0 = fetchAttribute(triIndices.x);
+        // VertexAttribute va1 = fetchAttribute(triIndices.y);
+        // VertexAttribute va2 = fetchAttribute(triIndices.z);
+        // normal = normalize((1-bary.x-bary.y)*va0.normal+bary.x*va1.normal+bary.y*va2.normal);
+        normal = flatNormal;
+        // TODO: Interpolate texture coordinates and sample texture
+        vec3 objColor = vec3(0.6,0.1,0.55);
+        color = objColor;
+    }
+
+    return t;
+}
+
+// Traces a ray through the scene and returns its color
+vec3 traceRay(vec3 ro, vec3 rd, inout uint seed, out float firstT){
+    vec3 rayLight = vec3(0);
+    vec3 absorption = vec3(1);
+
+    firstT = -1;
+    for(uint bounce = 0; bounce < 4; ++bounce){
+        vec3 normal;
+        vec3 color;
+        float t = sceneIntersect(ro,rd,normal,color);// modelIntersect(ro,rd,bary,triIndices);
+        if(t < 0){
+            vec3 bgc = backgroundColor(rd);
+            bool bounce = frand(seed) > 0.7; // Reflection or diffuse ray
+            rayLight += bounce?bgc:bgc*absorption;
+            break;
+        }
+        // Alternative light source detection
+        float luminance = dot(color,vec3(0.2126,0.7152,0.0722));
+        if(luminance > 1){
+            rayLight += absorption*color;
+            break;
+        }
+        // On the first success full hit, remember the t for reprojection
+        if(bounce == 0){
+            firstT = t;
+        }
+        ro = ro+rd*t + 1e-3*normal; // New world point. Offset sLightly in direction of normel to avoid self shadowing
+        absorption *= color;
+        rayLight += absorption*lightAtPoint(ro,normal,seed);
+        rd = cosineDirection(normal, seed);
+    }
+    return rayLight;
+}
+
+// Quadratic distance, saves a square root
+float distance2(vec3 a, vec3 b){
+    vec3 d = a-b;
+    return dot(d,d);
+}
+
+void main(){
+
+    ivec2 texCoords = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 bounds = imageSize(tex);
+    if(any(greaterThanEqual(texCoords,bounds))) return;
+
+    uint seed = scene.frame;
+    seed = uint(texCoords.x+texCoords.y*bounds.x)+pcg_hash(seed);
+
+    // uv 0,0 is top left corner, not pixel center. need to move pixel center to get correct position
+    vec2 uv = (vec2(texCoords)+vec2(0.5))/vec2(bounds);
+
+    // Calculate a world-space ray 
+    vec2 pixelNdc = 2. * uv - 1.;
+    vec3 pixelViewSpace = (cam.ndcToView * vec4(pixelNdc,1.,1.)).xyz;
+    vec3 rd = normalize(mat3(cam.toWorld) * pixelViewSpace);
+    vec3 ro = cam.toWorld[3].xyz;
+
+    // Trace a ray
+    float firstT = -1;
+    vec3 col = traceRay(ro,rd,seed,firstT);
+
+    // World space of the object in question
+    vec3 wPos = ro+rd*firstT;
+    float numFrames = 1;
+    
+    // Instead of nested ifs, use break for flow control
+    for(int i = 0; i < 1; ++i){
+        // Didn't hit a thing or nothing to accumulate yet
+        if(scene.frame == 0 || firstT < 0)
+            break;
+
+        // Project point into old frame
+        vec4 clipSpace = prevCam.projection * prevCam.view * vec4(wPos,1);
+
+        // Test whether point is outside of previous frame
+        if((clipSpace.x < -clipSpace.w || clipSpace.x > clipSpace.w) ||
+            (clipSpace.y < -clipSpace.w || clipSpace.y > clipSpace.w))
+            break;
+
+        // Find the old values
+        vec2 prevUV = clipSpace.xy/clipSpace.w*0.5+0.5;
+        vec3 prevPosWorld = texture(prevPosTex,prevUV).xyz;
+
+        const float eps = 1e-2; // Distance in which we still acceppt the previous results
+        if(distance2(prevPosWorld,wPos) > eps*eps)
+            break;
+
+        // Sample previous colir
+        vec4 prev = texture(prevTex,prevUV);
+        vec3 prevCol = prev.rgb;
+        float prevFrames = prev.a;
+        numFrames += prevFrames;
+        // https://en.wikipedia.org/wiki/Moving_average
+        // Integrate current color into new color
+        col = prevCol + (col-prevCol)*(1./numFrames);
+    }
+
+    // Store results
+    imageStore(tex,texCoords,vec4(col,numFrames));
+    imageStore(posTex,texCoords,vec4(wPos,0));
+    return;
+}
+
+
