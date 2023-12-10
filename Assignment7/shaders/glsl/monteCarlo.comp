@@ -11,19 +11,26 @@ struct Triangle{
 
 // BVH Node Definition
 struct BVHNode {
-    vec3 min;
-    vec3 max;
-    int left; // Index of the left child or index of the first triangle for leaf nodes
-    int right; // Index of the right child or number of triangles for leaf nodes
+    vec4 minBounds;
+    vec4 maxBounds;
+    int left;   // Negative if leaf
+    int right;
+    int first;  // Only used if leaf
+    int count;  // Only used if leaf
 };
 
+
 layout(set = 2, binding = 0) readonly buffer BVHBuffer {
-    BVHNode bvhNodes[];
-};
+    BVHNode at[];
+}bvhNodes;
 
 layout(set = 2, binding = 1) readonly buffer Triangles{
     Triangle at[];
 }triangles;
+
+layout(set = 2, binding = 2) uniform RootNodeIndex {
+    uint rootIndex;
+};
 
 // Ping-Pong textures to accumulate results
 layout(set = 1, binding = 0, rgba16f) uniform image2D tex;
@@ -196,7 +203,8 @@ Sphere[] spheres = Sphere[](
 
 // Find t for plane defined by normal vector n and point p
 float planeIntersect(vec3 ro, vec3 rd, vec3 n, vec3 p){
-return dot(p-ro,n)/dot(rd,n);}
+    return dot(p-ro,n)/dot(rd,n);
+}
 
 // triangle degined by vertices v0, v1 and  v2
 vec3 triIntersect( vec3 ro, vec3 rd, vec3 v0, vec3 v1, vec3 v2 )
@@ -220,9 +228,9 @@ float modelIntersect(vec3 ro, vec3 rd, out vec2 bary, out uvec3 triIndices){
     // This holds information on which vertices to draw
     DrawIndexedIndirectCommand drawCmd = drawCommands.at[0];
 
-    // initialize t 
-    float txmax = 1./0.;
-    float t = txmax;
+    // initialize tMax with infinity
+    float tMax = 1./0.;
+    float t = tMax;
     for(uint i = drawCmd.firstIndex; i < drawCmd.indexCount; i+=3){
         // Grab the indices
         uvec3 indices = uvec3(
@@ -244,126 +252,98 @@ float modelIntersect(vec3 ro, vec3 rd, out vec2 bary, out uvec3 triIndices){
         }
     }
 
-    if(t == txmax) return -1;
+    if(t == tMax) return -1;
     return t;
 }
 
-
-// Function to traverse the BVH and find the closest intersection
-float traverseBVH(vec3 ro, vec3 rd, int nodeIndex, out vec3 flatNormal) {
+//render all triangles with normal per face and looping over triangles array (test before BVH traversal)
+float modelIntersectFlat(vec3 ro, vec3 rd, out vec3 flatNormal){
     // This holds information on which vertices to draw
     DrawIndexedIndirectCommand drawCmd = drawCommands.at[0];
 
-    
-    float t = -1.0;
-
-    // Traverse the BVH
-    while (nodeIndex >= 0) {
-        BVHNode node = bvhNodes[nodeIndex];
-
-        // Perform ray-box intersection test
-        float txmin = (node.min.x - ro.x) / rd.x;
-        float txmax = (node.max.x - ro.x) / rd.x;
-
-        if (txmin > txmax) {
-            float temp = txmin;
-            txmin = txmax;
-            txmax = temp;
-        }
-
-        float tymin = (node.min.y - ro.y) / rd.y;
-        float tymax = (node.max.y - ro.y) / rd.y;
-
-        if (tymin > tymax) {
-            float temp = tymin;
-            tymin = tymax;
-            tymax = temp;
-        }
-
-        if ((txmin > tymax) || (tymin > txmax)) {
-            break;
-        }
-
-        if (tymin > txmin) {
-            txmin = tymin;  
-        }
-
-        if (tymax < txmax) {
-            txmax = tymax;
-        }
-
-        float tzmin = (node.min.z - ro.z) / rd.z;
-        float tzmax = (node.max.z - ro.z) / rd.z;
-
-        if (tzmin > tzmax) {
-            float temp = tzmin;
-            tzmin = tzmax;
-            tzmax = temp;
-        }
-
-        if ((txmin > tzmax) || (tzmin > txmax)) {
-            break;
-        }
-
-        if (tzmin > txmin) {
-            txmin = tzmin;
-        }
-
-        if (tzmax < txmax) {
-            txmax = tzmax;
-        }
-
-        // Leaf node
-        if (node.left < 0) {
-            
-            // Intersect with triangles in the leaf node
-            for (int i = -node.left; i < node.right; i++) {
-                // vec3 v0 = fetchVertex(indices[i].x);
-                // vec3 v1 = fetchVertex(indices[i].y);
-                // vec3 v2 = fetchVertex(indices[i].z);
-
-                vec3 v0 = triangles.at[i].v0;
-                vec3 v1 = triangles.at[i].v1;
-                vec3 v2 = triangles.at[i].v2;
-
-
-                vec3 tuv = triIntersect(ro, rd, v0, v1, v2);
-                if (tuv.x > 0.0 && (tuv.x < t || t < 0.0)) {
-                    t = tuv.x;
-                    //bary = tuv.yz;
-                    flatNormal = normalize(cross(v1-v0, v2-v0)); //using a per face normal for simplicity
-                }
-            }
-
-            // Move to the next BVH node in the stack
-            nodeIndex = -1;
-        } else {
-            // Non-leaf node, choose the next child to visit
-            int nearChild = (txmin > tymin) ? ((txmin > tzmin) ? 0 : 2) : ((tymin > tzmin) ? 1 : 2);
-            int farChild = (txmax < tymax) ? ((txmin < tzmin) ? 2 : 0) : ((txmin < tzmin) ? 1 : 0);
-
-            if (txmin > txmax) {
-                int temp = nearChild;
-                nearChild = farChild;
-                farChild = temp;
-            }
-
-            float tnear = txmin > 0.0 ? txmin : txmax; // Entry point
-
-            // First, push the far child onto the stack
-            if (farChild != -1) {
-                nodeIndex = farChild;
-            }
-
-            // Then, continue with the near child
-            if (nearChild != -1) {
-                nodeIndex = nearChild;
-            }
+    // initialize tMax with infinity
+    float tMax = 1./0.;
+    float t = tMax;
+    uint numTriangles = drawCmd.indexCount / 3; 
+    for(uint i = 0; i < numTriangles; ++i){
+        vec3 v0 = triangles.at[i].v0;
+        vec3 v1 = triangles.at[i].v1;
+        vec3 v2 = triangles.at[i].v2;
+        // Test whether there is an intersection
+        vec3 tuv = triIntersect(ro,rd,v0,v1,v2);
+        // On hit, update information
+        if(tuv.x > 0 && tuv.x < t){
+            t = tuv.x;
+            flatNormal = normalize(cross(v1-v0, v2-v0)); //using a per face normal for simplicity
         }
     }
 
+    if(t == tMax) return -1;
     return t;
 }
+
+bool intersectAABB(vec3 ro, vec3 rd, vec4 minBounds, vec4 maxBounds) {
+    vec3 invDir = 1.0 / rd;
+    
+    vec3 tMin = (vec3(minBounds) - ro) * invDir;
+    vec3 tMax = (vec3(maxBounds) - ro) * invDir;
+
+    vec3 t1 = min(tMin, tMax);
+    vec3 t2 = max(tMin, tMax);
+
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar = min(min(t2.x, t2.y), t2.z);
+
+    return tNear <= tFar && tFar >= 0.0;
+}
+
+// Function to traverse the BVH and find the closest intersection
+float traverseBVH(vec3 ro, vec3 rd, out vec3 flatNormal) {
+    // Initialize traversal stack
+    uint stack[64]; // Maximum depth of the BVH tree
+    int stackPtr = 0;
+    stack[stackPtr++] = rootIndex; // Start with the root node
+
+    float tMax = 1./0.; // Initialize tMax with infinity
+    float t = tMax;  
+
+
+    while (stackPtr > 0) {
+        uint nodeIndex = stack[--stackPtr];
+        BVHNode node = bvhNodes.at[nodeIndex];
+    
+        
+        if (!intersectAABB(ro, rd, node.minBounds, node.maxBounds)) {
+            continue; // Skip if ray doesn't intersect AABB
+        }
+        
+        if (node.left < 0) { // Leaf node
+            // Check intersection with triangles in the leaf
+            for (int i = 0; i < node.count; ++i) {
+                // Perform ray-triangle intersection 
+                vec3 v0 = triangles.at[node.first + i].v0;
+                vec3 v1 = triangles.at[node.first + i].v1;
+                vec3 v2 = triangles.at[node.first + i].v2;
+
+                vec3 tuv = triIntersect(ro, rd, v0, v1, v2);
+                if (tuv.x > 0 && tuv.x < t) {
+                    t = tuv.x;
+                    // Compute color and normal here or pass indices to do it outside
+                    flatNormal = normalize(cross(v1-v0, v2-v0)); //using a per face normal for simplicity
+                }
+            }
+        } else {
+            // Push children to the stack
+            stack[stackPtr++] = node.left;
+            stack[stackPtr++] = node.right;
+        }
+    }
+    // Return -1 if no triangle is intersected
+    if(t == tMax) return -1;
+    // Return closest intersection
+    return t;
+}
+
 
 
 // simplified test to only check whether there is any hit at all
@@ -372,12 +352,12 @@ float traverseBVH(vec3 ro, vec3 rd, int nodeIndex, out vec3 flatNormal) {
 bvec2 anyHit2(vec3 ro, vec3 rd0,vec3 rd1){
 
     bvec2 hit = bvec2(false);
-    for(uint s = 0 ; s < spheres.length(); ++s){
-        hit.x = hit.x || sphereIntersect(ro,rd0,spheres[s]) > 0;
-        hit.y = hit.y || sphereIntersect(ro,rd1,spheres[s]) > 0;
-        if(hit.x && hit.y) 
-            return hit;
-    }
+    // for(uint s = 0 ; s < spheres.length(); ++s){
+    //     hit.x = hit.x || sphereIntersect(ro,rd0,spheres[s]) > 0;
+    //     hit.y = hit.y || sphereIntersect(ro,rd1,spheres[s]) > 0;
+    //     if(hit.x && hit.y) 
+    //         return hit;
+    // }
 
     DrawIndexedIndirectCommand drawCmd = drawCommands.at[0];
 
@@ -434,7 +414,7 @@ vec3 checkerboard(vec3 point, float tileSize){
 float sceneIntersect(vec3 ro, vec3 rd, out vec3 normal, out vec3 color){
     float t = -1;
     
-    // Ground Plain
+    //Ground Plane
     vec3 planeNormal = normalize(vec3(0.,1.,0.));
     vec3 planePoint = vec3(0,-0.5,0.);
     float tPlane = planeIntersect(ro,rd,planeNormal,planePoint);
@@ -445,20 +425,20 @@ float sceneIntersect(vec3 ro, vec3 rd, out vec3 normal, out vec3 color){
         color = checkerboard(hitPoint,0.5);
     }
 
-    // Testing the spheres
-    for(uint s = 0; s < spheres.length();++s){
-        float tSphere = sphereIntersect(ro,rd,spheres[s]);
-        if(tSphere > 0 && (tSphere < t || t < 0)){
-            t = tSphere;
-            vec3 hitPoint = ro+rd*t;
-            normal = normalize(hitPoint-spheres[s].center);
-            color = spheres[s].color;
-        }
-    }
+    // // Testing the spheres
+    // for(uint s = 0; s < spheres.length();++s){
+    //     float tSphere = sphereIntersect(ro,rd,spheres[s]);
+    //     if(tSphere > 0 && (tSphere < t || t < 0)){
+    //         t = tSphere;
+    //         vec3 hitPoint = ro+rd*t;
+    //         normal = normalize(hitPoint-spheres[s].center);
+    //         color = spheres[s].color;
+    //     }
+    // }
 
-    // Ray Triangle Intersections
-    //vec2 bary;
-    //uvec3 triIndices;
+    // // Ray Triangle Intersections
+    // vec2 bary;
+    // uvec3 triIndices;
     // float tModel = modelIntersect(ro,rd,bary,triIndices);
     // if(tModel > 0 && (tModel < t || t < 0)){
     //     t = tModel;
@@ -471,19 +451,22 @@ float sceneIntersect(vec3 ro, vec3 rd, out vec3 normal, out vec3 color){
     //     color = objColor;
     // }
 
-
+    // Ray Triangle Intersections
+    // vec3 flatNormal;
+    // float tModel = modelIntersectFlat(ro, rd, flatNormal);
+    // if(tModel > 0 && (tModel < t || t < 0)){
+    //     t = tModel;
+    //     normal = flatNormal;
+    //     vec3 objColor = vec3(0.6,0.1,0.55);
+    //     color = objColor;
+    // }
 
     // BVH Intersections
     vec3 flatNormal;
-    float tModel = traverseBVH(ro, rd, 0, flatNormal);
+    float tModel = traverseBVH(ro, rd, flatNormal);
     if(tModel > 0 && (tModel < t || t < 0)){
         t = tModel;
-        // VertexAttribute va0 = fetchAttribute(triIndices.x);
-        // VertexAttribute va1 = fetchAttribute(triIndices.y);
-        // VertexAttribute va2 = fetchAttribute(triIndices.z);
-        // normal = normalize((1-bary.x-bary.y)*va0.normal+bary.x*va1.normal+bary.y*va2.normal);
         normal = flatNormal;
-        // TODO: Interpolate texture coordinates and sample texture
         vec3 objColor = vec3(0.6,0.1,0.55);
         color = objColor;
     }
@@ -532,6 +515,7 @@ float distance2(vec3 a, vec3 b){
 }
 
 void main(){
+    
 
     ivec2 texCoords = ivec2(gl_GlobalInvocationID.xy);
     ivec2 bounds = imageSize(tex);

@@ -30,60 +30,64 @@ struct Triangle {
 };
 
 struct AABB {
-    glm::vec3 min;
-    glm::vec3 max;
+    glm::vec4 min; //using vec4 for alignment reasons
+    glm::vec4 max; //using vec4 for alignment reasons
+};
+
+struct BVHNodeData {
+    int left;   // Index of the left child in the nodes array, or -1 if leaf
+    int right;  // Index of the right child in the nodes array, or -1 if leaf
+    int first;  // First index of the primitive in this node (if leaf)
+    int count;  // Number of primitives in this node (if leaf)
 };
 
 struct BVHNode {
-    int left;     // Index of left child or index of the first primitive (if a leaf node, negative)
-    int right;    // Index of right child or index of the last primitive + 1 (if a leaf node)
-    AABB bounds;  // Bounding box of the node
+    AABB bounds;
+    BVHNodeData data;
 };
 
-AABB combineBoundingBoxes(const AABB& box1, const AABB& box2)
+struct BVHRootNodeIndex {
+    uint32_t root;
+};
+
+AABB computeBounds(const std::vector<Triangle>& triangles, int start, int end)
 {
-    AABB result;
-    result.min = glm::min(box1.min, box2.min);
-    result.max = glm::max(box1.max, box2.max);
-    return result;
-}
+    glm::vec4 min = glm::vec4(std::numeric_limits<float>::max());
+    glm::vec4 max = glm::vec4(-std::numeric_limits<float>::max());
 
-void buildBVHRecursive(const std::vector<AABB>& primitiveBounds, int start, int end, std::vector<BVHNode>& bvhNodes)
-{
-    BVHNode node;
-
-    // Base case: leaf node
-    if (end - start == 1) {
-        node.left = -start;  // Negative value indicates a leaf node
-        node.right = start + 1;
-        node.bounds = primitiveBounds[start];
-    } else {
-        // Split bounding volumes and build child nodes
-        int mid = (start + end) / 2;
-        node.left = bvhNodes.size();
-        buildBVHRecursive(primitiveBounds, start, mid, bvhNodes);
-
-        node.right = bvhNodes.size();
-        buildBVHRecursive(primitiveBounds, mid, end, bvhNodes);
-
-        // Combine child bounding volumes to form the current node's bounding volume
-        node.bounds = combineBoundingBoxes(bvhNodes[node.left].bounds, bvhNodes[node.right].bounds);
+    for (int i = start; i < end; ++i) {
+        const Triangle& tri = triangles[i];
+        min = glm::vec4(glm::min(glm::vec3(min), glm::min(tri.v0, glm::min(tri.v1, tri.v2))), 1);
+        max = glm::vec4(glm::max(glm::vec3(max), glm::max(tri.v0, glm::max(tri.v1, tri.v2))), 1);
     }
 
-    // Add the constructed node to the BVH
-    bvhNodes.push_back(node);
+    return {min, max};
 }
 
 
-std::vector<BVHNode> buildBVH(const std::vector<AABB>& primitiveBounds, int start, int end)
+int chooseSplitPosition(const std::vector<Triangle>& triangles, int start, int end)
 {
-    std::vector<BVHNode> bvhNodes;
-
-    // Recursively build BVH
-    buildBVHRecursive(primitiveBounds, start, end, bvhNodes);
-
-    return bvhNodes;
+    // Simply split the range in half
+    return start + (end - start) / 2;
 }
+
+int buildBVH(std::vector<BVHNode>& nodes, std::vector<Triangle>& triangles, int start, int end)
+{
+    if (end - start == 1) {
+        nodes.push_back({computeBounds(triangles, start, end), -1, -1, start, end - start});
+        return nodes.size() - 1;
+    }
+
+    AABB bounds = computeBounds(triangles, start, end);
+    int split = chooseSplitPosition(triangles, start, end);
+
+    int left = buildBVH(nodes, triangles, start, split);
+    int right = buildBVH(nodes, triangles, split, end);
+
+    nodes.push_back({bounds, left, right, -1, -1});
+    return nodes.size() - 1;
+}
+
 
 
 int main()
@@ -92,7 +96,7 @@ int main()
     tga::Interface tgai;
 
 #pragma region create window
-    uint32_t resolutionScale{30};  // 80: 720p, 120: 1080p
+    uint32_t resolutionScale{40};  // 80: 720p, 120: 1080p
     uint32_t windowWidth = 16 * resolutionScale, windowHeight = 9 * resolutionScale;
 
     auto window = tgai.createWindow({windowWidth, windowHeight, tga::PresentMode::immediate});
@@ -148,33 +152,16 @@ int main()
         triangles.push_back({v0, v1, v2});
     }
 
-    //create a AABB for every triangle
-    std::vector<AABB> primitiveBounds;
-    for (auto t : triangles) {
-       
-        AABB box;
-        box.min = glm::min(glm::min(t.v0, t.v1), t.v2);
-        box.max = glm::max(glm::max(t.v0, t.v1), t.v2);
-
-        primitiveBounds.push_back(box);
-    }
-    std::cout << primitiveBounds.size() << std::endl;
     // Build BVH
-    std::vector<BVHNode> bvhNodes = buildBVH(primitiveBounds, 0, primitiveBounds.size());
-    std::cout << bvhNodes.size() << std::endl;
+    static_assert(alignof(glm::vec3) == 16);
+    std::vector<BVHNode> bvhNodes;
+    BVHRootNodeIndex rootNodeIndex(buildBVH(bvhNodes, triangles, 0, triangles.size()));
+    std::cout << rootNodeIndex.root << std::endl;
+    tga::StagingBuffer rootNodeStaging =
+        tgai.createStagingBuffer({sizeof(BVHRootNodeIndex), tga::memoryAccess(rootNodeIndex)});
+    tga::Buffer rootNodeBuffer = tgai.createBuffer({tga::BufferUsage::uniform, sizeof(BVHRootNodeIndex), rootNodeStaging});
 
-    /*for (auto node : bvhNodes) {
-        std::cout << "node.left:" << node.left << std::endl;
-        std::cout << "node.right:" << node.right << std::endl;
-        std::cout << "node.bounds.min:" << node.bounds.min.x << ',' << node.bounds.min.y << ',' << node.bounds.min.z
-                  << std::endl;
-        std::cout << "node.bounds.max:" << node.bounds.max.x << ',' << node.bounds.max.y << ',' << node.bounds.max.z
-                  << std::endl;
-
-        
-    }*/
-
-
+  
     std::vector<tga::DrawIndexedIndirectCommand> drawCmds{{.indexCount = static_cast<uint32_t>(indexBufferCPU.size()),
                                                            .instanceCount = 1,
                                                            .firstIndex = 0,
@@ -215,7 +202,9 @@ int main()
                               tga::SetLayout{tga::BindingType::storageImage, tga::BindingType::sampler,
                                              tga::BindingType::uniformBuffer, tga::BindingType::uniformBuffer,
                                              tga::BindingType::storageImage, tga::BindingType::sampler},
-                              tga::SetLayout{tga::BindingType::storageBuffer, tga::BindingType::storageBuffer}}});
+                              tga::SetLayout{tga::BindingType::storageBuffer, tga::BindingType::storageBuffer, 
+                                             tga::BindingType::uniformBuffer}
+                            }});
 
     auto sceneDataBuffer = tgai.createBuffer({tga::BufferUsage::uniform, sizeof(uint32_t)});
     // Double buffer the camera
@@ -249,8 +238,8 @@ int main()
          1});
     
     //BVH related input
-    auto computeInput2 =
-        tgai.createInputSet({cp, {tga::Binding{bvhNodesBuffer, 0}, tga::Binding{trianglesBuffer, 1}},
+    auto computeInput2 = tgai.createInputSet(
+        {cp, {tga::Binding{bvhNodesBuffer, 0}, tga::Binding{trianglesBuffer, 1}, tga::Binding{rootNodeBuffer, 2}},
             2});
 
     // Which texture to present
@@ -261,9 +250,9 @@ int main()
     float fov{70}, aspectRatio{windowWidth / float(windowHeight)}, nearPlane{0.1}, farPlane{1000.};
     CameraData cam, prevCam;
     float pitch{0}, yaw{140};
-    float speed = 2.;
-    float speedBoost = 2;
-    float turnSpeed = 38;
+    float speed = 7.;
+    float speedBoost = 8;
+    float turnSpeed = 75;
     glm::vec3 camPos{-5, 0.5, 5};
 
     auto moveCamera = [&](float dt) {
