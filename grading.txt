@@ -16,3 +16,6 @@ Assignment 5: 4/5
  Assignment 6: 3/5
  - (-1) does not do accumulation over time
  - (-1) does not do reprojection on camera movement
+ 
+ Assignment 7: 4/5
+ - (-1) No differentiation between top and bottom level acceleration structure
