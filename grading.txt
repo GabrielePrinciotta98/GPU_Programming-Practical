@@ -19,3 +19,6 @@ Assignment 5: 4/5
  
  Assignment 7: 4/5
  - (-1) No differentiation between top and bottom level acceleration structure
+
+ Assignment 8: 0/5
+ - No submission
